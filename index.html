@@ -112,7 +112,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.25";
+const APP_VERSION = "4.28";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1534,6 +1534,10 @@ function MovimientosView({ positions, reopenPos }) {
   const [stratStatus, setStratStatus] = useState("Abiertas");
   const [expanded, setExpanded] = useState(new Set());
   const toggleExpand = (id) => setExpanded((s) => { const x = new Set(s); x.has(id) ? x.delete(id) : x.add(id); return x; });
+  const [collapsedMonths, setCollapsedMonths] = useState(new Set());
+  const toggleMonth = (key) => setCollapsedMonths((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
+  const [collapsedYears, setCollapsedYears] = useState(new Set());
+  const toggleYear = (key) => setCollapsedYears((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
 
   const openingPrimaPerShare = (p) => {
     const chain = p.rollChain || [];
@@ -1616,6 +1620,8 @@ function MovimientosView({ positions, reopenPos }) {
     yearTotals[yKey].fees += e.fee || 0;
   });
   const monthKeys = Object.keys(monthGroups).sort();
+  const yearKeys = Object.keys(yearTotals).sort();
+  const monthsOfYear = (y) => monthKeys.filter((k) => (k === "sin-fecha" ? y === "sin-fecha" : k.slice(0, 4) === y));
   const grandTotal = events.reduce((s, e) => s + e.cash, 0);
   const grandFees = events.reduce((s, e) => s + (e.fee || 0), 0);
   const MESES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
@@ -1674,26 +1680,41 @@ function MovimientosView({ positions, reopenPos }) {
           )}
 
           {events.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, padding: "4px 0 6px", borderBottom: `1px solid ${T.line}` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, padding: "4px 0 6px", borderBottom: `1px solid ${T.line}` }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha</span>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Ticker</span>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingRight: 8 }}>Fee</span>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingLeft: 8 }}>{sub === "primas" ? "Prima" : "P&L"}</span>
             </div>
           )}
-          {monthKeys.map((key) => (
-            <div key={key} style={{ marginTop: 4 }}>
-              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 0", fontVariantNumeric: "tabular-nums" }}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>{monthLabel(key)}</span>
-                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(monthGroups[key].fees)}</span>
-                <span style={{ fontSize: 14, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(monthGroups[key].total)}</span>
+          {yearKeys.map((y) => {
+            const yCollapsed = collapsedYears.has(y);
+            return (
+            <div key={y} style={{ marginTop: 10 }}>
+              <div onClick={() => toggleYear(y)} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", background: T.dark, borderRadius: 12, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: "#fff", textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>
+                  {y === "sin-fecha" ? "Sin fecha" : y}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: "#C4CCD4", textAlign: "right", paddingRight: 10 }}>${money2(yearTotals[y].fees)}</span>
+                <span style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 10 }}>{signMoney(yearTotals[y].total)}</span>
               </div>
-              {monthGroups[key].items.map((e) => {
+              {!yCollapsed && monthsOfYear(y).map((key) => {
+            const isCollapsed = collapsedMonths.has(key);
+            return (
+            <div key={key} style={{ marginTop: 4 }}>
+              <div onClick={() => toggleMonth(key)} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 10px 8px 0", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>
+                  {monthLabel(key)}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 10 }}>${money2(monthGroups[key].fees)}</span>
+                <span style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 10 }}>{signMoney(monthGroups[key].total)}</span>
+              </div>
+              {!isCollapsed && monthGroups[key].items.map((e) => {
                 const blk = BLOCKS.find((b) => b.id === e.block);
                 const open = expanded.has(e.id);
                 return (
                   <div key={e.id} onClick={() => toggleExpand(e.id)} style={{ borderTop: `1px solid ${T.line}`, cursor: "pointer" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", padding: "9px 0", fontVariantNumeric: "tabular-nums" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", padding: "9px 0", fontVariantNumeric: "tabular-nums" }}>
                       <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(e.date)}</span>
                       <span style={{ fontSize: 13.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", paddingRight: 6 }}>{e.tkr || "—"}</span>
                       <span style={{ fontSize: 12.5, fontWeight: 700, color: T.sub, textAlign: "right", whiteSpace: "nowrap", paddingRight: 8 }}>${money2(e.fee)}</span>
@@ -1715,18 +1736,22 @@ function MovimientosView({ positions, reopenPos }) {
                 );
               })}
             </div>
-          ))}
+            );
+          })}
+            </div>
+            );
+          })}
 
           {events.length > 0 && (
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: `2px solid ${T.line}` }}>
               {Object.keys(yearTotals).sort().map((y) => (
-                <div key={y} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", marginBottom: 6, fontVariantNumeric: "tabular-nums" }}>
+                <div key={y} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", marginBottom: 6, fontVariantNumeric: "tabular-nums" }}>
                   <span style={{ fontSize: 11.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total {y}</span>
                   <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(yearTotals[y].fees)}</span>
                   <span style={{ fontSize: 13.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(yearTotals[y].total)}</span>
                 </div>
               ))}
-              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", paddingTop: 6, borderTop: `1px solid ${T.line}`, fontVariantNumeric: "tabular-nums" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", paddingTop: 6, borderTop: `1px solid ${T.line}`, fontVariantNumeric: "tabular-nums" }}>
                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total acum.</span>
                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(grandFees)}</span>
                 <span style={{ fontSize: 15, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(grandTotal)}</span>
