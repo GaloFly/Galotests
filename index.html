@@ -63,7 +63,7 @@ function applyTheme(dark) {
     { id: 3, name: "Bloque 3", tag: "High Risk", desc: "Earnings · 0DTE · spreads", color: T.orange, bg: T.tileAmber, badge: T.orange,
       tMin: 0.00, tMax: 0.05, scaleMin: 0, scaleMax: 0.15, band: 0.03 },
   ];
-  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "movimientos", label: "🔁 Movimientos", color: T.purple }, { id: "vencimientos", label: "📅 Vencimientos", color: T.orange }, { id: "rendimiento", label: "📈 Rendimiento", color: T.gold }, { id: "aportaciones", label: "💶 Aportaciones", color: T.green }];
+  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "vencimientos", label: "📅 Vencimientos", color: T.orange }, { id: "rendimiento", label: "📈 Rendimiento", color: T.gold }, { id: "aportaciones", label: "💶 Aportaciones", color: T.green }];
 }
 applyTheme(false);
 const RULES = { elNlv: { green: 0.4, amber: 0.25 }, elMrgn: { green: 1.0, amber: 0.5 } };
@@ -105,13 +105,12 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.08";
+const APP_VERSION = "4.10";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
 const KEY_FLOWS = "bloques_aportaciones_v1";
-const KEY_MOV = "bloques_movimientos_v1";
-const BACKUP_KEYS = [KEY_ACC, KEY_POS, KEY_SNAP, KEY_BROKERS, KEY_TRADES, KEY_BASIS, KEY_VIEW, KEY_FINNHUB, KEY_GEMINI, KEY_FLOWS, KEY_MOV, "bloques_show_pnl"];
+const BACKUP_KEYS = [KEY_ACC, KEY_POS, KEY_SNAP, KEY_BROKERS, KEY_TRADES, KEY_BASIS, KEY_VIEW, KEY_FINNHUB, KEY_GEMINI, KEY_FLOWS, "bloques_show_pnl"];
 const BASIS_KEYS = ["roi", "annRoi", "rom", "annRom", "impact"];
 
 /* ---------- persistencia ---------- */
@@ -254,51 +253,6 @@ const dteDeltaOf = (tr) => {
 };
 const strikeLineOf = (tr) => [strikeRightOf(tr), expiryOf(tr)].filter(Boolean).join(" · ");
 const newId = () => "p" + Math.random().toString(36).slice(2, 8);
-/* ---------- movimientos: registro de operaciones (esquema de la pestaña Movimientos del Excel) ----------
-   Cada movimiento guarda la prima bruta, comisión y un snapshot de contexto de cuenta (ctx: margin/liq/riesgo/nlv)
-   auto-capturado del último snapshot de Rendimiento — así los % históricos (prima ÷ margin/liq/nlv) no dependen
-   del estado actual de la cuenta. Un ROLL es UN solo movimiento con las dos patas: rollClose (débito de recompra,
-   negativo) + rollOpen (crédito de la pata nueva); strike/expiry del movimiento = los de la pata NUEVA.
-   primaNeta = bruto − comisión (mismo criterio que la columna PRIMA NETA del Excel). */
-const MOV_EVENTS = ["Apertura", "Roll", "Cierre", "Asignación", "Vencimiento"];
-const MOV_STRATS = ["Short Put", "Covered Call", "Short Call", "PMCC", "Long Call Leaps", "Calendar", "DC", "DD", "Diagonal", "Iron Condor", "Iron Fly", "Iron Man", "Call Broken Wing", "Put Broken Wing", "Double Calendar", "Strangle", "Earnings", "0DTE", "Otros"];
-/* solo estas estrategias se encadenan en cadenas de rolado (put-side y call-side de una pata) */
-const CHAIN_STRATS = new Set(["Short Put", "Covered Call", "Short Call"]);
-const movSide = (m) => (m.right === "C" ? "C" : "P");
-const movGross = (m) => (m.event === "Roll" ? n(m.rollOpen) + n(m.rollClose) : n(m.primaTotal));
-const movNeta = (m) => movGross(m) - n(m.comision);
-const movFx = (m) => (n(m.fx) > 0 ? n(m.fx) : 1);
-const movEur = (m) => movNeta(m) / movFx(m);
-const isChainable = (m) => CHAIN_STRATS.has(m.strategy);
-const CHAIN_CLOSED_BY = { "Cierre": "cerrada", "Asignación": "asignada", "Vencimiento": "expirada" };
-/* agrupa los movimientos encadenables por chainId (asignado al guardar: apertura = su propio id,
-   roll/cierre = id de la cadena a la que se une). Deriva por cadena: pata actual, crédito neto acumulado,
-   BEP efectivo, realizado vs pata abierta y estado (abierta / cerrada / asignada / expirada). */
-function buildChains(movs) {
-  const map = {};
-  movs.filter(isChainable).forEach((m) => {
-    const key = m.chainId || m.id;
-    if (!map[key]) map[key] = [];
-    map[key].push(m);
-  });
-  return Object.entries(map).map(([id, list]) => {
-    const seq = [...list].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
-    const first = seq[0], last = seq[seq.length - 1];
-    const legs = seq.filter((m) => m.event === "Apertura" || m.event === "Roll");
-    const curLeg = legs.length ? legs[legs.length - 1] : first;
-    const status = CHAIN_CLOSED_BY[last.event] || null; // null = abierta
-    const neto = seq.reduce((s, m) => s + movNeta(m), 0);
-    const contracts = n(curLeg.qty) || 1;
-    const perShare = neto / (contracts * 100);
-    const side = movSide(curLeg);
-    /* BEP efectivo: para puts, strike actual − crédito acumulado por acción. Para calls (covered/short)
-       el crédito acumulado REDUCE la base del subyacente — se muestra como reducción, no como BEP absoluto
-       (la base de la acción no se registra aquí). */
-    const bep = side === "P" ? n(curLeg.strike) - perShare : null;
-    const openCredit = status ? 0 : (curLeg.event === "Roll" ? n(curLeg.rollOpen) : n(curLeg.primaTotal));
-    return { id, tkr: first.tkr, side, strategy: first.strategy, seq, curLeg, status, neto, perShare, bep, contracts, openCredit, realizado: neto - openCredit, rolls: seq.filter((m) => m.event === "Roll").length };
-  }).sort((a, b) => (a.seq[a.seq.length - 1].date < b.seq[b.seq.length - 1].date ? 1 : -1));
-}
 /* ---------- lector de capturas con Gemini (visión) para el Comparador ---------- */
 function fileToBase64(file) {
   return new Promise((resolve, reject) => {
@@ -620,9 +574,6 @@ function InfoModal({ type, onClose }) {
   } : type === "exposicion" ? {
     title: "Exposición por subyacente",
     body: "Agrupa todas las posiciones del mismo ticker (aunque estén en distintos bloques o sean acción + opción) y muestra su peso real: dentro de cada bloque en el que aparece, sobre el MKT VL total, sobre el NLV y sobre el margen usado. % MKT VL es la lectura de concentración más limpia — no depende de cuánta caja tengas aparcada. % NLV es la que usan los objetivos de bloque (10/12%, 70/80%…), porque ese es tu marco de EL/NLV. El circulito antes del ticker es el % NLV de ese subyacente: verde hasta 12%, ámbar hasta 20%, rojo por encima — el mismo umbral que usarías para un límite de concentración por posición individual. Si ya tienes convicción alta en algo (como ASTS) es normal y esperado que salga en rojo; el dot es solo una señal visual, no un tope automático.",
-  } : type === "movimientos" ? {
-    title: "Movimientos",
-    body: "Registro operativo (equivale a la pestaña Movimientos del Excel): cada apertura, roll, cierre, asignación o vencimiento con su prima, comisión y el contexto de cuenta del momento (margin, excess liquidity, riesgo y NLV, auto-capturados del último snapshot de Rendimiento y editables). Un roll es un solo movimiento con las dos patas: recompra de la vieja + crédito de la nueva. Las estrategias Short Put, Covered Call y Short Call se encadenan automáticamente en cadenas de rolado por ticker y lado: la vista Cadenas muestra la secuencia completa, el crédito neto acumulado, el BEP efectivo tras cada roll y el realizado vs la pata abierta. La lente Prima suma el flujo de caja neto; Realizado solo cuenta lo ya cerrado (la apertura no suma hasta que su pata se cierra, rola, vence o se asigna).",
   } : type === "vencimientos" ? {
     title: "Vencimientos",
     body: "Agrupa solo las opciones (no las acciones) por fecha de vencimiento y suma el mismo Riesgo total que usas en el resto de la app (para CRED es BEP × cantidad, igual que el Notional del Comparador). Así el capital en riesgo de cada fecha es directamente comparable con el de un bloque o un subyacente — no es el desembolso por asignación (eso sería Strike × cantidad, siempre algo mayor porque no descuenta la prima ya cobrada).",
@@ -1175,321 +1126,6 @@ function AportacionesCard({ flows, setFlows, brokers }) {
   );
 }
 
-/* ---------- movimientos: alta con contexto auto, lista mensual con acumulados y cadenas de rolado ---------- */
-const EVENT_COLOR = () => ({ "Apertura": T.green, "Roll": T.purple, "Cierre": T.gold, "Asignación": T.red, "Vencimiento": T.sub });
-function MovimientosCard({ movs, setMovs, snapshots, onOpen }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const latestSnap = useMemo(() => (snapshots.length ? [...snapshots].sort((a, b) => (a.date < b.date ? 1 : -1))[0] : null), [snapshots]);
-  /* contexto de cuenta auto-capturado del último snapshot de Rendimiento; editable a mano en el formulario */
-  const ctxFromSnap = () => ({
-    margin: latestSnap ? String(Math.round(latestSnap.margin)) : "",
-    liq: latestSnap ? String(Math.round(latestSnap.el)) : "",
-    riesgo: latestSnap ? String(Math.round(latestSnap.totalRiesgo)) : "",
-    nlv: latestSnap ? String(Math.round(latestSnap.nlv)) : "",
-  });
-  const blankDraft = () => ({ tkr: "", date: today, block: "2", strategy: "Short Put", event: "Apertura", right: "P", qty: "1", strike: "", expiry: "", primaTotal: "", rollClose: "", rollOpen: "", comision: "", fx: "1", chainSel: "AUTO", note: "", ctx: ctxFromSnap() });
-  const [formOpen, setFormOpen] = useState(false);
-  const [draft, setDraft] = useState(blankDraft);
-  const [ctxOpen, setCtxOpen] = useState(false);
-  const [viewMode, setViewMode] = useState("Lista");
-  const [lens, setLens] = useState("Prima");
-  const [stratFilter, setStratFilter] = useState("Todas");
-  const [expanded, setExpanded] = useState(null);
-  const setD = (k) => (v) => setDraft((d) => ({ ...d, [k]: v }));
-  const setDctx = (k) => (v) => setDraft((d) => ({ ...d, ctx: { ...d.ctx, [k]: v } }));
-  const openForm = () => { setDraft(blankDraft()); setCtxOpen(false); setFormOpen(true); };
-
-  const chains = useMemo(() => buildChains(movs), [movs]);
-  /* cadenas abiertas candidatas para unir el movimiento del formulario (mismo ticker + lado) */
-  const draftTkr = draft.tkr.trim().toUpperCase();
-  const candidates = useMemo(() => chains.filter((c) => !c.status && c.tkr === draftTkr && c.side === draft.right), [chains, draftTkr, draft.right]);
-  const needsChainPick = CHAIN_STRATS.has(draft.strategy) && draft.event !== "Apertura";
-
-  /* realizado por movimiento, consciente de cadenas: la apertura no realiza nada; el roll realiza
-     crédito de la pata anterior + débito de recompra; cierre/asignación/vencimiento realizan el resto */
-  const realizedMap = useMemo(() => {
-    const map = {};
-    chains.forEach((ch) => {
-      let prevCredit = 0;
-      ch.seq.forEach((m) => {
-        if (m.event === "Apertura") { map[m.id] = 0; prevCredit = n(m.primaTotal); }
-        else if (m.event === "Roll") { map[m.id] = prevCredit + n(m.rollClose) - n(m.comision); prevCredit = n(m.rollOpen); }
-        else { map[m.id] = prevCredit + n(m.primaTotal) - n(m.comision); prevCredit = 0; }
-      });
-    });
-    movs.forEach((m) => { if (map[m.id] == null) map[m.id] = m.event === "Apertura" ? 0 : movNeta(m); });
-    return map;
-  }, [movs, chains]);
-  const valOf = (m) => (lens === "Prima" ? movNeta(m) : realizedMap[m.id] || 0);
-
-  const stratOptions = useMemo(() => ["Todas", ...MOV_STRATS.filter((s) => movs.some((m) => m.strategy === s))], [movs]);
-  const filteredMovs = useMemo(() => movs.filter((m) => stratFilter === "Todas" || m.strategy === stratFilter), [movs, stratFilter]);
-  const sorted = useMemo(() => [...filteredMovs].sort((a, b) => (a.date < b.date ? 1 : -1)), [filteredMovs]);
-  /* agrupación mensual con total y % sobre contexto (mismas columnas que las filas TOTAL del Excel) */
-  const monthGroups = useMemo(() => {
-    const groups = [];
-    const idx = {};
-    sorted.forEach((m) => {
-      const key = (m.date || "").slice(0, 7);
-      if (idx[key] == null) { idx[key] = groups.length; groups.push({ key, items: [] }); }
-      groups[idx[key]].items.push(m);
-    });
-    groups.forEach((g) => {
-      g.total = g.items.reduce((s, m) => s + valOf(m), 0);
-      g.totalEur = g.items.reduce((s, m) => s + (lens === "Prima" ? movEur(m) : (realizedMap[m.id] || 0) / movFx(m)), 0);
-      const withCtx = g.items.find((m) => m.ctx && n(m.ctx.nlv) > 0);
-      g.ctx = withCtx ? withCtx.ctx : null;
-    });
-    return groups;
-  }, [sorted, lens, realizedMap]);
-  const totalAll = filteredMovs.reduce((s, m) => s + valOf(m), 0);
-  const curYear = today.slice(0, 4), curMonth = today.slice(0, 7);
-  const totalYear = filteredMovs.filter((m) => (m.date || "").slice(0, 4) === curYear).reduce((s, m) => s + valOf(m), 0);
-  const totalMonth = filteredMovs.filter((m) => (m.date || "").slice(0, 7) === curMonth).reduce((s, m) => s + valOf(m), 0);
-
-  const save = () => {
-    if (!draftTkr || !draft.date) return;
-    const id = newId();
-    let chainId = null;
-    if (CHAIN_STRATS.has(draft.strategy)) {
-      if (draft.event === "Apertura") chainId = id;
-      else if (draft.chainSel === "NUEVA") chainId = id;
-      else if (draft.chainSel !== "AUTO") chainId = draft.chainSel;
-      else chainId = candidates.length ? candidates[0].id : id;
-    }
-    setMovs((ms) => [...ms, { id, tkr: draftTkr, date: draft.date, block: n(draft.block), strategy: draft.strategy, event: draft.event, right: draft.right, qty: draft.qty, strike: draft.strike, expiry: draft.expiry, primaTotal: draft.primaTotal, rollClose: draft.rollClose, rollOpen: draft.rollOpen, comision: draft.comision, fx: draft.fx, note: draft.note.trim(), chainId, ctx: { ...draft.ctx } }]);
-    setDraft(blankDraft()); setFormOpen(false);
-  };
-  const del = (id) => { setMovs((ms) => ms.filter((m) => m.id !== id)); if (expanded === id) setExpanded(null); };
-  const setMov = (id, k) => (v) => setMovs((ms) => ms.map((m) => (m.id === id ? { ...m, [k]: v } : m)));
-  const setMovCtx = (id, k) => (v) => setMovs((ms) => ms.map((m) => (m.id === id ? { ...m, ctx: { ...(m.ctx || {}), [k]: v } } : m)));
-
-  const monthLabel = (key) => { const d = new Date(key + "-01T00:00:00"); return isNaN(d) ? key : d.toLocaleDateString("es-ES", { month: "long", year: "numeric" }); };
-  const evColor = EVENT_COLOR();
-  const badge = (ev) => <span style={{ fontSize: 9, fontWeight: 800, color: "#fff", background: evColor[ev] || T.sub, borderRadius: 6, padding: "2px 6px", textTransform: "uppercase", letterSpacing: 0.3, flexShrink: 0 }}>{ev}</span>;
-  const pctCtx = (v, base) => (n(base) > 0 && isFinite(v) ? pct(v / n(base)) : null);
-  const ctxLine = (total, ctx) => {
-    if (!ctx) return null;
-    const parts = [["MRGN", ctx.margin], ["LIQ", ctx.liq], ["RIESGO", ctx.riesgo], ["NLV", ctx.nlv]].map(([lbl, base]) => { const p = pctCtx(total, base); return p ? p + " " + lbl : null; }).filter(Boolean);
-    return parts.length ? parts.join(" · ") : null;
-  };
-  const chainLabel = (c) => `${c.tkr} ${strikeStr(c.curLeg.strike)}${c.side}${c.curLeg.expiry ? " " + ibkrDate(c.curLeg.expiry) : ""} · acum ${signMoney(c.neto)}`;
-
-  return (
-    <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, display: "flex", alignItems: "center", gap: 5 }}>Movimientos <InfoDot onClick={() => onOpen("movimientos")} /></div>
-        <button onClick={formOpen ? () => setFormOpen(false) : openForm} style={{ background: formOpen ? T.tile : T.green, border: "none", borderRadius: 12, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: formOpen ? T.ink : "#fff", cursor: "pointer" }}>{formOpen ? "Cancelar" : "+ Movimiento"}</button>
-      </div>
-
-      {/* ALTA */}
-      {formOpen && (
-        <div style={{ background: T.tile, borderRadius: 16, padding: 12, marginBottom: 14 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-            <EditField label="Ticker" value={draft.tkr} onChange={setD("tkr")} text />
-            <EditField label="Fecha" value={draft.date} onChange={setD("date")} type="date" />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-            <SelectField label="Bloque" value={draft.block} options={["0", "1", "2", "3"]} onChange={setD("block")} />
-            <SelectField label="Estrategia" value={draft.strategy} options={MOV_STRATS} onChange={setD("strategy")} />
-          </div>
-          <div style={{ marginBottom: 8 }}>
-            <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Evento</span>
-            <Pill options={MOV_EVENTS} value={draft.event} onChange={setD("event")} size="sm" />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "auto 1fr 1fr 1.3fr", gap: 8, marginBottom: 8, alignItems: "end" }}>
-            <div>
-              <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>P/C</span>
-              <Pill options={["P", "C"]} value={draft.right} onChange={setD("right")} size="sm" />
-            </div>
-            <EditField label="Contratos" value={draft.qty} onChange={setD("qty")} />
-            <EditField label={draft.event === "Roll" ? "Strike nuevo" : "Strike"} value={draft.strike} onChange={setD("strike")} />
-            <EditField label={draft.event === "Roll" ? "Vto. nuevo" : "Vencimiento"} value={draft.expiry} onChange={setD("expiry")} type="date" smallLabel />
-          </div>
-          {draft.event === "Roll" ? (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-              <EditField label="Recompra pata vieja" value={draft.rollClose} onChange={setD("rollClose")} prefix="$" signed smallLabel />
-              <EditField label="Crédito pata nueva" value={draft.rollOpen} onChange={setD("rollOpen")} prefix="$" signed smallLabel />
-            </div>
-          ) : (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-              <EditField label="Prima total" value={draft.primaTotal} onChange={setD("primaTotal")} prefix="$" signed />
-              <div style={{ alignSelf: "end", fontSize: 10.5, color: T.sub, fontWeight: 600, lineHeight: 1.4, paddingBottom: 6 }}>+ crédito cobrado · − débito pagado{draft.event === "Vencimiento" ? " (vence sin valor → 0)" : ""}</div>
-            </div>
-          )}
-          {draft.event === "Roll" && (n(draft.rollOpen) + n(draft.rollClose) !== 0) && (
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: n(draft.rollOpen) + n(draft.rollClose) >= 0 ? T.green : T.red, marginBottom: 8 }}>Rentabilidad añadida por el rolado: {signMoney(n(draft.rollOpen) + n(draft.rollClose))}</div>
-          )}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-            <EditField label="Comisión" value={draft.comision} onChange={setD("comision")} prefix="$" />
-            <EditField label="FX (USD/EUR)" value={draft.fx} onChange={setD("fx")} />
-          </div>
-          {needsChainPick && (
-            <div style={{ marginBottom: 8 }}>
-              <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Cadena de rolado</span>
-              {candidates.length === 0 ? (
-                <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>{draftTkr ? "Sin cadena abierta de " + draftTkr + " " + draft.right + " — se creará una nueva." : "Escribe el ticker para buscar cadenas abiertas."}</div>
-              ) : (
-                <>
-                  <select value={draft.chainSel === "AUTO" ? candidates[0].id : draft.chainSel} onChange={(e) => setD("chainSel")(e.target.value)}
-                    style={{ width: "100%", boxSizing: "border-box", background: T.card, border: `1.5px solid ${candidates.length > 1 && draft.chainSel === "AUTO" ? T.gold : T.line}`, borderRadius: 11, color: T.ink, fontSize: 13.5, fontWeight: 700, padding: "9px 10px", outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-                    {candidates.map((c) => <option key={c.id} value={c.id}>{chainLabel(c)}</option>)}
-                    <option value="NUEVA">➕ Nueva cadena aparte</option>
-                  </select>
-                  {candidates.length > 1 && <div style={{ fontSize: 11, color: T.gold, fontWeight: 700, marginTop: 4 }}>Hay {candidates.length} cadenas abiertas de {draftTkr} {draft.right} — confirma cuál estás rolando/cerrando.</div>}
-                </>
-              )}
-            </div>
-          )}
-          <button onClick={() => setCtxOpen((o) => !o)} style={{ background: "transparent", border: "none", padding: "2px 0", fontSize: 11.5, fontWeight: 700, color: T.sub, cursor: "pointer", marginBottom: 6 }}>{ctxOpen ? "▾" : "▸"} Contexto de cuenta {latestSnap ? "(auto del snapshot " + latestSnap.date + ")" : "(sin snapshots — rellena a mano)"}</button>
-          {ctxOpen && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
-              <EditField label="Margin" value={draft.ctx.margin} onChange={setDctx("margin")} prefix="$" smallLabel />
-              <EditField label="Exc. Liq" value={draft.ctx.liq} onChange={setDctx("liq")} prefix="$" smallLabel />
-              <EditField label="Riesgo" value={draft.ctx.riesgo} onChange={setDctx("riesgo")} prefix="$" smallLabel />
-              <EditField label="NLV" value={draft.ctx.nlv} onChange={setDctx("nlv")} prefix="$" smallLabel />
-            </div>
-          )}
-          <EditField label="Nota (opcional)" value={draft.note} onChange={setD("note")} text />
-          <button onClick={save} disabled={!draftTkr || !draft.date} style={{ marginTop: 10, width: "100%", background: draftTkr && draft.date ? T.green : T.line, border: "none", borderRadius: 14, padding: "12px 0", fontSize: 14.5, fontWeight: 700, color: "#fff", cursor: draftTkr && draft.date ? "pointer" : "default" }}>Guardar movimiento</button>
-        </div>
-      )}
-
-      {/* ACUMULADOS + FILTROS */}
-      <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
-        <MicroStat label={"Mes · " + lens} value={signMoney(totalMonth)} color={totalMonth >= 0 ? T.green : T.red} />
-        <MicroStat label={"Año " + curYear} value={signMoney(totalYear)} color={totalYear >= 0 ? T.green : T.red} />
-        <MicroStat label="Total" value={signMoney(totalAll)} color={totalAll >= 0 ? T.green : T.red} />
-      </div>
-      <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap", alignItems: "center" }}>
-        <Pill options={["Lista", "Cadenas"]} value={viewMode} onChange={setViewMode} size="sm" />
-        <Pill options={["Prima", "Realizado"]} value={lens} onChange={setLens} size="sm" />
-        {stratOptions.length > 1 && (
-          <select value={stratFilter} onChange={(e) => setStratFilter(e.target.value)}
-            style={{ background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 10, color: stratFilter === "Todas" ? T.sub : T.ink, fontSize: 11.5, fontWeight: 700, padding: "6px 8px", outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-            {stratOptions.map((s) => <option key={s} value={s}>{s === "Todas" ? "Estrategia: todas" : s}</option>)}
-          </select>
-        )}
-      </div>
-
-      {movs.length === 0 && <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "4px 0" }}>Sin movimientos todavía. Registra aquí cada apertura, roll, cierre, asignación o vencimiento con su prima y comisión — este es el registro operativo; las posiciones vivas de los bloques son la foto actual.</div>}
-
-      {/* LISTA POR MESES */}
-      {viewMode === "Lista" && monthGroups.map((g) => (
-        <div key={g.key}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 10, padding: "6px 2px 4px", borderBottom: `2px solid ${T.line}` }}>
-            <span style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5 }}>{monthLabel(g.key)}</span>
-            <span style={{ fontSize: 13, fontWeight: 800, color: g.total >= 0 ? T.green : T.red }}>{signMoney(g.total)}{Math.abs(g.totalEur - g.total) > 0.5 ? " · " + Math.round(g.totalEur).toLocaleString("en-US") + "€" : ""}</span>
-          </div>
-          {ctxLine(g.total, g.ctx) && <div style={{ fontSize: 10, color: T.sub, fontWeight: 600, padding: "3px 2px 0", textAlign: "right" }}>{ctxLine(g.total, g.ctx)}</div>}
-          {g.items.map((m) => {
-            const v = valOf(m);
-            const isOpenRow = expanded === m.id;
-            return (
-              <div key={m.id} style={{ borderBottom: `1px solid ${T.line}` }}>
-                <div onClick={() => setExpanded(isOpenRow ? null : m.id)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 0", cursor: "pointer", gap: 8 }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 13.5, fontWeight: 800, color: T.ink }}>{m.tkr}</span>
-                      {badge(m.event)}
-                      <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>B{m.block}</span>
-                    </div>
-                    <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginTop: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                      {new Date(m.date + "T00:00:00").toLocaleDateString("es-ES", { day: "2-digit", month: "short" })} · {m.strategy}{n(m.strike) > 0 ? " · " + strikeStr(m.strike) + movSide(m) : ""}{m.expiry ? " " + ibkrDate(m.expiry) : ""}
-                    </div>
-                  </div>
-                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 800, color: v >= 0 ? T.green : T.red }}>{lens === "Realizado" && m.event === "Apertura" ? "—" : signMoney(v)}</div>
-                    {m.event === "Roll" && <div style={{ fontSize: 9.5, fontWeight: 700, color: T.purple }}>↻ añade {signMoney(n(m.rollOpen) + n(m.rollClose))}</div>}
-                  </div>
-                </div>
-                {isOpenRow && (
-                  <div style={{ background: T.tile, borderRadius: 14, padding: 10, marginBottom: 10 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
-                      <EditField label="Ticker" value={m.tkr} onChange={setMov(m.id, "tkr")} text />
-                      <EditField label="Fecha" value={m.date} onChange={setMov(m.id, "date")} type="date" />
-                      <SelectField label="Bloque" value={String(m.block)} options={["0", "1", "2", "3"]} onChange={(val) => setMov(m.id, "block")(n(val))} />
-                      <SelectField label="Estrategia" value={m.strategy} options={MOV_STRATS} onChange={setMov(m.id, "strategy")} />
-                      <SelectField label="Evento" value={m.event} options={MOV_EVENTS} onChange={setMov(m.id, "event")} />
-                      <EditField label="Contratos" value={m.qty} onChange={setMov(m.id, "qty")} />
-                      <EditField label="Strike" value={m.strike} onChange={setMov(m.id, "strike")} />
-                      <EditField label="Vencimiento" value={m.expiry} onChange={setMov(m.id, "expiry")} type="date" smallLabel />
-                      {m.event === "Roll" ? (
-                        <>
-                          <EditField label="Recompra vieja" value={m.rollClose} onChange={setMov(m.id, "rollClose")} prefix="$" signed smallLabel />
-                          <EditField label="Crédito nueva" value={m.rollOpen} onChange={setMov(m.id, "rollOpen")} prefix="$" signed smallLabel />
-                        </>
-                      ) : (
-                        <EditField label="Prima total" value={m.primaTotal} onChange={setMov(m.id, "primaTotal")} prefix="$" signed />
-                      )}
-                      <EditField label="Comisión" value={m.comision} onChange={setMov(m.id, "comision")} prefix="$" />
-                      <EditField label="FX" value={m.fx} onChange={setMov(m.id, "fx")} />
-                    </div>
-                    <div style={{ fontSize: 10, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 4 }}>Contexto de cuenta en el momento</div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
-                      <EditField label="Margin" value={(m.ctx || {}).margin} onChange={setMovCtx(m.id, "margin")} prefix="$" smallLabel />
-                      <EditField label="Exc. Liq" value={(m.ctx || {}).liq} onChange={setMovCtx(m.id, "liq")} prefix="$" smallLabel />
-                      <EditField label="Riesgo" value={(m.ctx || {}).riesgo} onChange={setMovCtx(m.id, "riesgo")} prefix="$" smallLabel />
-                      <EditField label="NLV" value={(m.ctx || {}).nlv} onChange={setMovCtx(m.id, "nlv")} prefix="$" smallLabel />
-                    </div>
-                    {ctxLine(movNeta(m), m.ctx) && <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600, marginBottom: 8 }}>Prima neta {signMoney(movNeta(m))} = {ctxLine(movNeta(m), m.ctx)}{movFx(m) !== 1 ? " · " + Math.round(movEur(m)).toLocaleString("en-US") + "€" : ""}</div>}
-                    <EditField label="Nota" value={m.note} onChange={setMov(m.id, "note")} text />
-                    <button onClick={() => del(m.id)} style={{ marginTop: 8, width: "100%", background: T.tileRed, border: "none", borderRadius: 12, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar movimiento</button>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ))}
-
-      {/* CADENAS DE ROLADO */}
-      {viewMode === "Cadenas" && (
-        <>
-          {chains.filter((c) => stratFilter === "Todas" || c.strategy === stratFilter).length === 0 && (
-            <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "4px 0" }}>Sin cadenas todavía. Se crean automáticamente al registrar movimientos de Short Put, Covered Call o Short Call: la apertura inicia la cadena y cada roll/cierre se une a ella.</div>
-          )}
-          {chains.filter((c) => stratFilter === "Todas" || c.strategy === stratFilter).map((c) => (
-            <div key={c.id} style={{ background: T.tile, borderRadius: 16, padding: 12, marginBottom: 10 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 8 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 14.5, fontWeight: 800, color: T.ink }}>{c.tkr}</span>
-                  <span style={{ fontSize: 11, fontWeight: 700, color: T.sub }}>{c.strategy}</span>
-                  <span style={{ fontSize: 9.5, fontWeight: 800, color: "#fff", background: c.status ? T.sub : T.green, borderRadius: 6, padding: "2px 7px", textTransform: "uppercase", letterSpacing: 0.3 }}>{c.status || "abierta"}</span>
-                  {c.rolls > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: T.purple }}>↻ {c.rolls} {c.rolls === 1 ? "roll" : "rolls"}</span>}
-                </div>
-                <span style={{ fontSize: 15, fontWeight: 800, color: c.neto >= 0 ? T.green : T.red, flexShrink: 0 }}>{signMoney(c.neto)}</span>
-              </div>
-              <div style={{ display: "flex", gap: 12, marginBottom: 8, flexWrap: "wrap" }}>
-                {!c.status && <MicroStat label="Pata actual" value={`${strikeStr(c.curLeg.strike)}${c.side}${c.curLeg.expiry ? " " + ibkrDate(c.curLeg.expiry) : ""}`} />}
-                {c.bep != null && <MicroStat label="BEP efectivo" value={"$" + money2(c.bep)} color={T.purple} />}
-                {c.side === "C" && <MicroStat label="Reduce base" value={"$" + money2(c.perShare) + "/acc"} color={T.purple} />}
-                <MicroStat label="Realizado" value={signMoney(c.realizado)} color={c.realizado >= 0 ? T.green : T.red} />
-                {!c.status && <MicroStat label="Pata abierta" value={signMoney(c.openCredit)} color={T.sub} />}
-              </div>
-              {c.seq.map((m, i) => (
-                <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${T.line}`, padding: "7px 0", gap: 8 }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
-                    <span style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, flexShrink: 0 }}>{new Date(m.date + "T00:00:00").toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "2-digit" })}</span>
-                    {badge(m.event)}
-                    <span style={{ fontSize: 11.5, fontWeight: 700, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{n(m.strike) > 0 ? strikeStr(m.strike) + movSide(m) : ""}{m.expiry ? " " + ibkrDate(m.expiry) : ""}{m.note ? " · " + m.note : ""}</span>
-                  </div>
-                  <div style={{ textAlign: "right", flexShrink: 0 }}>
-                    <span style={{ fontSize: 12.5, fontWeight: 800, color: movNeta(m) >= 0 ? T.green : T.red }}>{signMoney(movNeta(m))}</span>
-                    {m.event === "Roll" && <div style={{ fontSize: 9, fontWeight: 700, color: T.purple }}>↻ {signMoney(n(m.rollOpen) + n(m.rollClose))}</div>}
-                  </div>
-                </div>
-              ))}
-            </div>
-          ))}
-        </>
-      )}
-
-      <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, marginTop: 12 }}>Prima = flujo de caja neto de comisiones de cada movimiento (criterio de la pestaña Movimientos del Excel). Realizado = resultado ya cerrado: la apertura no cuenta hasta que su pata se cierra, rola, vence o se asigna. Los % del total mensual usan el contexto de cuenta (margin / excess liquidity / riesgo / NLV) capturado con los movimientos de ese mes.</div>
-    </div>
-  );
-}
-
 /* ---------- swipe a la izquierda para eliminar ---------- */
 function SwipeDelete({ onDelete, children }) {
   const [dx, setDx] = useState(0);
@@ -1519,7 +1155,7 @@ function SwipeDelete({ onDelete, children }) {
 }
 
 /* ---------- fila de posición ---------- */
-function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctCartera, showPnl, brokers }) {
+function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose, onReopen, pctBloque, pctCartera, showPnl, brokers, hideBroker }) {
   const detail = optionDetail(p);
   const nat = natOf(p);
   const cap = capDesplegado(p);
@@ -1532,6 +1168,30 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
   const pnlVal = effPnl(p);
   const pnlBasis = Math.abs(effBep(p) * n(p.qty)) || Math.abs(n(p.mktValue)) || cap;
   const pnlPct = pnlBasis ? pnlVal / pnlBasis : NaN;
+  const rollChain = p.rollChain || [];
+  const canRoll = !!onRoll && !p.closed && opt && natOf(p) === "CRED"; // roll de cadena: solo opciones cortas (Short Put/Short Call, nat=Crédito)
+  const canClose = !!onClose && !p.closed && (nat === "ACC" || nat === "COLLAR" || opt); // acciones/collar/cualquier opción se pueden cerrar
+  const [rolling, setRolling] = useState(false);
+  const [rollDate, setRollDate] = useState("");
+  const [rollStrike, setRollStrike] = useState("");
+  const [rollExpiry, setRollExpiry] = useState("");
+  const [rollBuyback, setRollBuyback] = useState("");
+  const [rollCredit, setRollCredit] = useState("");
+  const [rollComision, setRollComision] = useState("");
+  const openRoll = () => { setRollDate(new Date().toISOString().slice(0, 10)); setRollStrike(p.strike || ""); setRollExpiry(""); setRollBuyback(""); setRollCredit(""); setRollComision(""); setRolling(true); };
+  const confirmRoll = () => {
+    onRoll({ date: rollDate, strike: rollStrike, expiry: rollExpiry, buybackCost: rollBuyback, newCredit: rollCredit, comision: rollComision });
+    setRolling(false);
+  };
+  const [closing, setClosing] = useState(false);
+  const [closeDateV, setCloseDateV] = useState("");
+  const [closePriceV, setClosePriceV] = useState("");
+  const [closeComisionV, setCloseComisionV] = useState("");
+  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setClosing(true); };
+  const confirmClose = () => {
+    onClose({ date: closeDateV, price: closePriceV, comision: closeComisionV });
+    setClosing(false);
+  };
   return (
     <div style={{ borderTop: `1px solid ${T.line}`, padding: "10px 0" }}>
       <div onClick={onToggle} style={{ cursor: "pointer" }}>
@@ -1541,6 +1201,8 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
               <span style={{ fontSize: 15, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.tkr || (cash ? "Cash" : "Sin ticker")}</span>
               {p.tipo && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>{p.tipo}</span>}
               {detail && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub }}>{detail}</span>}
+              {rollChain.length > 0 && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.purple, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>🔄 ×{rollChain.length}</span>}
+              {p.closed && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>Cerrada</span>}
             </div>
             {!cash && <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 700, marginTop: 3 }}>× {qtyNum} <span style={{ fontWeight: 600, fontSize: 11 }}>{qtyUnit}</span></div>}
           </div>
@@ -1573,11 +1235,18 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
 
       {editing && (
         <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          {!hideBroker && (
           <label>
             <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Broker</span>
             <Pill options={brokers} value={p.broker} onChange={onChange("broker")} />
           </label>
+          )}
           <EditField label="Ticker" value={p.tkr} onChange={onChange("tkr")} text />
+          <div style={{ gridColumn: hideBroker ? "auto" : "span 2" }}>
+            <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha de entrada</span>
+            <input type="date" value={p.entryDate || ""} onChange={(e) => onChange("entryDate")(e.target.value)}
+              style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 11, color: p.entryDate ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
+          </div>
           <SelectField label="Estrategia" value={p.tipo} options={STRATS[p.block] || []} span={2}
             onChange={(val) => { onChange("tipo")(val); const newNat = natFromStrat(val); onChange("nat")(newNat); if (newNat === "CASH") onChange("tkr")("CASH"); }} />
           {!cash && (isOptionNat(p) ? (
@@ -1609,10 +1278,11 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
             </>
           )}
           {!cash && (bepAutoStrat(p) ? (
-            <EditField label={"Prima (" + (bepAutoStrat(p) === "CREDIT" ? "crédito recibido" : "débito pagado") + ")"} prefix="$" value={p.prima} onChange={onChange("prima")} />
+            <EditField label={"Prima (" + (bepAutoStrat(p) === "CREDIT" ? "crédito recibido" : "débito pagado") + ") · por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
           ) : (
             <EditField label="BEP" prefix="$" value={p.bep} onChange={onChange("bep")} />
           ))}
+          {!cash && <EditField label="Comisión (entrada)" prefix="$" value={p.comision} onChange={onChange("comision")} />}
           {!cash && <EditField label="Último (precio actual)" prefix="$" value={p.last} onChange={onChange("last")} />}
           {!cash && bepAutoStrat(p) && (
             <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1701,6 +1371,68 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
             )}
           </label>
           )}
+          {canRoll && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "10px 11px" }}>
+              {rollChain.length > 0 && (
+                <div style={{ fontSize: 11, color: T.sub, fontWeight: 700, marginBottom: 8 }}>
+                  🔄 Rolado ×{rollChain.length} · entrada original {optionDetail({ strike: rollChain[0].prevStrike, expiry: rollChain[0].prevExpiry, right: p.right })}
+                </div>
+              )}
+              {!rolling ? (
+                <button type="button" onClick={openRoll} style={{ width: "100%", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>🔄 Rolar esta posición (misma entrada)</button>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, gridColumn: "span 2" }}>El histórico ({optionDetail(p)}) queda guardado en la cadena. Precios por acción — se multiplican ×{n(p.qty) || 100} al calcular el cash</div>
+                  <div>
+                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha del roll</span>
+                    <input type="date" value={rollDate} onChange={(e) => setRollDate(e.target.value)}
+                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: rollDate ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
+                  </div>
+                  <EditField label="Nuevo strike" value={rollStrike} onChange={setRollStrike} />
+                  <div>
+                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Nuevo expiry</span>
+                    <input type="date" value={rollExpiry} onChange={(e) => setRollExpiry(e.target.value)}
+                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: rollExpiry ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
+                  </div>
+                  <EditField label="Coste recompra (contrato viejo)" prefix="$" value={rollBuyback} onChange={setRollBuyback} />
+                  <EditField label="Crédito nueva entrada" prefix="$" value={rollCredit} onChange={setRollCredit} />
+                  <EditField label="Comisión del roll" prefix="$" value={rollComision} onChange={setRollComision} span={2} />
+                  <div style={{ gridColumn: "span 2", display: "flex", gap: 8 }}>
+                    <button type="button" onClick={() => setRolling(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
+                    <button type="button" onClick={confirmRoll} disabled={!rollStrike || !rollExpiry || !rollDate} style={{ flex: 1, background: T.green, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!rollStrike || !rollExpiry || !rollDate) ? 0.5 : 1 }}>Confirmar roll</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {canClose && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "10px 11px" }}>
+              {!closing ? (
+                <button type="button" onClick={openClose} style={{ width: "100%", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>✕ Cerrar posición</button>
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, gridColumn: "span 2" }}>{opt ? "Precio de recompra para cerrar la opción" : "Precio de venta para cerrar la posición"} · por acción</div>
+                  <div>
+                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha de cierre</span>
+                    <input type="date" value={closeDateV} onChange={(e) => setCloseDateV(e.target.value)}
+                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: closeDateV ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
+                  </div>
+                  <EditField label={opt ? "Precio de recompra" : "Precio de venta"} prefix="$" value={closePriceV} onChange={setClosePriceV} />
+                  <EditField label="Comisión de cierre" prefix="$" value={closeComisionV} onChange={setCloseComisionV} span={2} />
+                  <div style={{ gridColumn: "span 2", display: "flex", gap: 8 }}>
+                    <button type="button" onClick={() => setClosing(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
+                    <button type="button" onClick={confirmClose} disabled={!closeDateV || !closePriceV} style={{ flex: 1, background: T.red, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!closeDateV || !closePriceV) ? 0.5 : 1 }}>Confirmar cierre</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {p.closed && !!onReopen && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>Cerrada el {ibkrDate(p.closeDate)} a ${money2(n(p.closePrice))}</span>
+              <button type="button" onClick={onReopen} style={{ background: "transparent", border: "none", fontSize: 12, fontWeight: 700, color: T.purple, cursor: "pointer" }}>Reabrir</button>
+            </div>
+          )}
           <button onClick={onDelete} style={{ gridColumn: "span 2", background: "transparent", border: "none", borderRadius: 10, padding: "8px 0", fontSize: 13, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar posición</button>
         </div>
       )}
@@ -1709,10 +1441,11 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, pctBloque, pctC
 }
 
 /* ---------- tarjeta de bloque activo ---------- */
-function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, showPnl, togglePnl, brokers }) {
-  const capBlock = positions.reduce((s, p) => s + capDesplegado(p), 0);
-  const plausibleBlock = positions.reduce((s, p) => s + plausibleOf(p), 0);
-  const pnl = positions.reduce((s, p) => s + effPnl(p), 0);
+function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, rollPos, closePos, reopenPos, showPnl, togglePnl, brokers }) {
+  const activePositions = positions.filter((p) => !p.closed);
+  const capBlock = activePositions.reduce((s, p) => s + capDesplegado(p), 0);
+  const plausibleBlock = activePositions.reduce((s, p) => s + plausibleOf(p), 0);
+  const pnl = activePositions.reduce((s, p) => s + effPnl(p), 0);
   const pctNlv = nlv ? capBlock / nlv : NaN;
   const pctNlvPlausible = nlv ? plausibleBlock / nlv : NaN;
   const zones = bandZones(blk);
@@ -1760,6 +1493,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
           <SwipeDelete key={p.id} onDelete={() => delPos(p.id)}>
             <PositionRow p={p} editing={editSet.has(p.id)} onToggle={() => toggleEdit(p.id)}
               onChange={(k) => (v) => setPos(p.id, k, v)} onDelete={() => delPos(p.id)} showPnl={showPnl} brokers={brokers}
+              onRoll={(vals) => rollPos(p.id, vals)} onClose={(vals) => closePos(p.id, vals)} onReopen={() => reopenPos(p.id)}
               pctBloque={capBlock ? capDesplegado(p) / capBlock : NaN} pctCartera={nlv ? capDesplegado(p) / nlv : NaN} />
           </SwipeDelete>
         ))}
@@ -1769,6 +1503,129 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
     </div>
   );
 }
+
+/* ---------- MOVIMIENTOS: vista de nivel superior (no es pestaña de bloque). Las posiciones se crean y
+   editan siempre desde su bloque (fecha de entrada, roll, cierre); aquí solo se reconstruye su historial
+   en dos sub-vistas:
+   · Primas — cash de prima de cada pata: apertura, recompra/nueva entrada de cada roll, cierre de opción.
+     Solo posiciones con prima real (nat Crédito, o Débito con prima automática tipo Long Call Leaps).
+     El cash de cada pata es precio por acción × cantidad (1 contrato = 100 acciones).
+   · MTM — resultado REALIZADO: el neto de cada roll (crédito nuevo − recompra − comisión, puede salir
+     negativo si se pagó más al recomprar de lo que se cobró) y el resultado de cerrar una posición de
+     acción/collar (precio de venta − BEP) × cantidad − comisión. ---------- */
+function MovimientosView({ positions }) {
+  const [sub, setSub] = useState("primas");
+
+  const openingPrimaPerShare = (p) => {
+    const chain = p.rollChain || [];
+    return chain.length > 0 ? n(chain[0].prevPrima) : n(p.prima);
+  };
+
+  const primaEvents = [];
+  const mtmEvents = [];
+
+  positions.forEach((p) => {
+    const qty = n(p.qty);
+    if (isOptionNat(p)) {
+      const autoStrat = bepAutoStrat(p);
+      if (autoStrat && p.entryDate) {
+        const sign = autoStrat === "CREDIT" ? 1 : -1;
+        const cash = sign * openingPrimaPerShare(p) * qty - n(p.comision);
+        primaEvents.push({ id: p.id + "-open", date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash });
+      }
+      (p.rollChain || []).forEach((r, idx) => {
+        primaEvents.push({ id: p.id + "-rb" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll · recompra", cash: -(n(r.buybackCost) * qty) - n(r.comision) });
+        primaEvents.push({ id: p.id + "-rn" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll · nueva entrada", cash: n(r.newCredit) * qty });
+        const net = (n(r.newCredit) - n(r.buybackCost)) * qty - n(r.comision);
+        mtmEvents.push({ id: p.id + "-rollnet" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll neto", cash: net });
+      });
+      if (p.closed && p.closePrice !== "" && p.closePrice != null) {
+        const sign = natOf(p) === "CRED" ? -1 : 1;
+        const cash = sign * n(p.closePrice) * qty - n(p.closeComision);
+        primaEvents.push({ id: p.id + "-close", date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash });
+      }
+    } else if ((natOf(p) === "ACC" || natOf(p) === "COLLAR") && p.closed && p.closePrice !== "" && p.closePrice != null) {
+      const net = (n(p.closePrice) - n(effBep(p))) * qty - n(p.closeComision);
+      mtmEvents.push({ id: p.id + "-closemtm", date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash: net });
+    }
+  });
+
+  const events = sub === "primas" ? primaEvents : mtmEvents;
+  events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  const groups = {};
+  events.forEach((e) => {
+    const key = e.date ? e.date.slice(0, 7) : "sin-fecha";
+    if (!groups[key]) groups[key] = { items: [], total: 0 };
+    groups[key].items.push(e);
+    groups[key].total += e.cash;
+  });
+  const monthKeys = Object.keys(groups).sort();
+  const grandTotal = events.reduce((s, e) => s + e.cash, 0);
+  const MESES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
+  const monthLabel = (key) => { if (key === "sin-fecha") return "Sin fecha"; const [y, m] = key.split("-"); return MESES[Number(m) - 1] + " " + y; };
+
+  return (
+    <>
+      <div style={{ display: "flex", gap: 6, background: T.card, borderRadius: 18, padding: 6, marginBottom: 14, boxShadow: T.shadow }}>
+        {[["primas", "💰 Primas"], ["mtm", "📊 MTM"]].map(([id, label]) => (
+          <button key={id} onClick={() => setSub(id)} style={{
+            flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 0", fontSize: 14, fontWeight: 800,
+            background: sub === id ? T.dark : "transparent", color: sub === id ? "#fff" : T.sub,
+          }}>{label}</button>
+        ))}
+      </div>
+
+      <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{sub === "primas" ? "Primas" : "MTM · resultado realizado"}</div>
+          <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, marginTop: 1 }}>
+            {sub === "primas" ? "Cash de prima de cada apertura, roll y cierre de opción. Se editan desde cada bloque." : "Resultado neto de cada roll y del cierre de acciones/collar. Negativo si el roll costó más de lo que se cobró."}
+          </div>
+        </div>
+
+        {events.length === 0 && (
+          <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "8px 0" }}>
+            {sub === "primas" ? "Aún no hay primas registradas. Se generan al abrir, rolar o cerrar una posición de opciones con fecha." : "Aún no hay resultado realizado. Se genera al rolar una opción o cerrar una posición de acción/collar."}
+          </div>
+        )}
+
+        {monthKeys.map((key) => (
+          <div key={key} style={{ marginTop: 4 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0 2px" }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5 }}>{monthLabel(key)}</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: groups[key].total >= 0 ? T.green : T.red }}>{signMoney(groups[key].total)}</span>
+            </div>
+            {groups[key].items.map((e) => {
+              const blk = BLOCKS.find((b) => b.id === e.block);
+              return (
+                <div key={e.id} style={{ borderTop: `1px solid ${T.line}`, padding: "8px 0", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>{e.tkr || "—"}</span>
+                      <span style={{ fontSize: 9.5, fontWeight: 800, color: e.kind.startsWith("Roll") ? T.purple : T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>{e.kind}</span>
+                      {blk && <span style={{ fontSize: 9.5, fontWeight: 800, color: blk.color, background: blk.bg, borderRadius: 6, padding: "2px 5px" }}>{blk.name.replace("Bloque ", "B")}</span>}
+                    </div>
+                    <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginTop: 2 }}>{[e.tipo, ibkrDate(e.date)].filter(Boolean).join(" · ")}</div>
+                  </div>
+                  <div style={{ fontSize: 14.5, fontWeight: 800, color: e.cash >= 0 ? T.green : T.red, flexShrink: 0 }}>{signMoney(e.cash)}</div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+
+        {events.length > 0 && (
+          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `2px solid ${T.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.4 }}>Total acumulado</span>
+            <span style={{ fontSize: 16, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red }}>{signMoney(grandTotal)}</span>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 
 /* ---------- COMPARADOR: fila EL con base ghost + delta ---------- */
 function ElRow({ label, post, base, delta, color, min, max, zones, marks }) {
@@ -2169,7 +2026,6 @@ function App() {
   const [updCheckMsg, setUpdCheckMsg] = useState("");
   const [snapshots, setSnapshots] = useState([]);
   const [flows, setFlows] = useState([]);
-  const [movimientos, setMovimientos] = useState([]);
   const [autoBackups, setAutoBackups] = useState([]);
   const [updateNotice, setUpdateNotice] = useState(null);
   const [confirmAutoBk, setConfirmAutoBk] = useState(null);
@@ -2177,7 +2033,7 @@ function App() {
   const [brokerModalOpen, setBrokerModalOpen] = useState(false);
   const [newBrokerName, setNewBrokerName] = useState("");
   const [removeTarget, setRemoveTarget] = useState({});
-  const [view, setView] = useState(() => { try { return localStorage.getItem(KEY_VIEW) === "comparador" ? "comparador" : "bloques"; } catch (e) { return "bloques"; } });
+  const [view, setView] = useState(() => { try { const v = localStorage.getItem(KEY_VIEW); return v === "comparador" || v === "movimientos" ? v : "bloques"; } catch (e) { return "bloques"; } });
   const selectView = (v) => { setView(v); try { localStorage.setItem(KEY_VIEW, v); } catch (e) {} };
   const [trades, setTrades] = useState([]);
   const [basis, setBasis] = useState(() => { try { const v = localStorage.getItem(KEY_BASIS); return BASIS_KEYS.includes(v) ? v : "annRom"; } catch (e) { return "annRom"; } });
@@ -2221,9 +2077,8 @@ function App() {
       }
       setAutoBackups(bks);
     } catch (e) {}
-    let haveAcc = false, havePos = false, haveMov = false;
+    let haveAcc = false, havePos = false;
     try { const f = localStorage.getItem(KEY_FLOWS); if (f) { const arr = JSON.parse(f); if (Array.isArray(arr)) setFlows(arr); } } catch (e) {}
-    try { const mv = localStorage.getItem(KEY_MOV); if (mv) { const arr = JSON.parse(mv); if (Array.isArray(arr)) { setMovimientos(arr); haveMov = true; } } } catch (e) {}
     try { const a = localStorage.getItem(KEY_ACC); if (a) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
     try { const p = localStorage.getItem(KEY_POS); if (p) { setPositions(withNat(JSON.parse(p))); havePos = true; } } catch (e) {}
     try { const k = localStorage.getItem(KEY_FINNHUB); if (k) setApiKey(k); } catch (e) {}
@@ -2235,7 +2090,6 @@ function App() {
     if (!haveTr) { try { const trOld = localStorage.getItem(KEY_TR_OLD); if (trOld) { const arr = JSON.parse(trOld); if (Array.isArray(arr) && arr.length) { setTrades(arr); haveTr = true; } } } catch (e) {} }
     (async () => {
       if (!haveTr) { const tr = await idbGet(KEY_TRADES); if (tr) { try { const arr = JSON.parse(tr); if (Array.isArray(arr)) setTrades(arr); } catch (e) {} } }
-      if (!haveMov) { const mv = await idbGet(KEY_MOV); if (mv) { try { const arr = JSON.parse(mv); if (Array.isArray(arr)) setMovimientos(arr); } catch (e) {} } }
       if (!haveAcc) { const a = await idbGet(KEY_ACC); if (a) { try { setAccounts(JSON.parse(a)); haveAcc = true; } catch (e) {} } }
       if (!havePos) { const p = await idbGet(KEY_POS); if (p) { try { setPositions(withNat(JSON.parse(p))); havePos = true; } catch (e) {} } }
       if (!haveAcc || !havePos) {
@@ -2257,7 +2111,6 @@ function App() {
   useEffect(() => { if (loaded) saveKV(KEY_FLOWS, flows); }, [flows, loaded]);
   useEffect(() => { if (loaded) saveKV(KEY_BROKERS, brokers); }, [brokers, loaded]);
   useEffect(() => { if (loaded) saveKV(KEY_TRADES, trades); }, [trades, loaded]);
-  useEffect(() => { if (loaded) saveKV(KEY_MOV, movimientos); }, [movimientos, loaded]);
   useEffect(() => { if (loaded) { try { localStorage.setItem(KEY_BASIS, basis); } catch (e) {} } }, [basis, loaded]);
   /* con un solo broker no existe "Todos": se selecciona directo y su cash/margin queda editable */
   useEffect(() => {
@@ -2287,7 +2140,7 @@ function App() {
       margenPct: p.margenPct != null ? p.margenPct : "100",
       margenModo: p.margenModo != null ? p.margenModo : "PCT",
     }));
-    setBackupText(JSON.stringify({ v: 12, appVersion: APP_VERSION, ts: Date.now(), brokers, accounts, positions: posOut, snapshots: nextSnaps, aportaciones: flows, movimientos, trades, compBasis: basis, finnhubKey: apiKey, geminiKey, showPnl }, null, 2));
+    setBackupText(JSON.stringify({ v: 11, appVersion: APP_VERSION, ts: Date.now(), brokers, accounts, positions: posOut, snapshots: nextSnaps, aportaciones: flows, trades, compBasis: basis, finnhubKey: apiKey, geminiKey, showPnl }, null, 2));
     setCopied(false); setRestoreMsg(""); setBackupOpen(true);
   };
   const copyBackup = async () => {
@@ -2317,7 +2170,6 @@ function App() {
       if (Array.isArray(d.positions)) setPositions(withNat(d.positions));
       if (Array.isArray(d.snapshots)) setSnapshots(d.snapshots);
       if (Array.isArray(d.aportaciones)) setFlows(d.aportaciones);
-      if (Array.isArray(d.movimientos)) setMovimientos(d.movimientos);
       if (Array.isArray(d.trades)) setTrades(d.trades);
       if (typeof d.compBasis === "string" && BASIS_KEYS.includes(d.compBasis)) setBasis(d.compBasis);
       if (typeof d.finnhubKey === "string" && d.finnhubKey) { setApiKey(d.finnhubKey); try { localStorage.setItem(KEY_FINNHUB, d.finnhubKey); } catch (e) {} }
@@ -2461,10 +2313,13 @@ function App() {
   };
 
   const filtered = useMemo(() => broker === "Todos" ? positions : positions.filter((p) => p.broker === broker), [positions, broker]);
+  /* activo = filtered sin las posiciones cerradas — todo lo que es riesgo/exposición/NLV se calcula sobre
+     esto; las cerradas siguen visibles en su bloque (para poder reabrirlas) y en Movimientos (su historial). */
+  const active = useMemo(() => filtered.filter((p) => !p.closed), [filtered]);
 
-  const mktvl = useMemo(() => filtered.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0), [filtered]);
+  const mktvl = useMemo(() => active.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0), [active]);
   /* posiciones Cash de B0: cuentan como cash del estado de cuenta (no como MKT VL) para no duplicar ni tener que meterlo a mano */
-  const posCash = useMemo(() => filtered.reduce((s, p) => s + (isCashNat(p) ? effMkt(p) : 0), 0), [filtered]);
+  const posCash = useMemo(() => active.reduce((s, p) => s + (isCashNat(p) ? effMkt(p) : 0), 0), [active]);
   const sumField = (field) => brokers.reduce((s, b) => s + n((accounts[b] || {})[field]), 0);
   const manualCash = broker === "Todos" ? sumField("cash") : n((accounts[broker] || {}).cash);
   const cash = manualCash + posCash;
@@ -2474,8 +2329,8 @@ function App() {
   const leverage = nlv !== 0 ? mktvl / nlv : NaN;
   const elNlv = nlv !== 0 ? el / nlv : NaN;
   const elMrgn = margin !== 0 ? el / margin : NaN;
-  const totalPnl = useMemo(() => filtered.reduce((s, p) => s + effPnl(p), 0), [filtered]);
-  const totalRiesgo = useMemo(() => filtered.reduce((s, p) => s + capDesplegado(p), 0), [filtered]);
+  const totalPnl = useMemo(() => active.reduce((s, p) => s + effPnl(p), 0), [active]);
+  const totalRiesgo = useMemo(() => active.reduce((s, p) => s + capDesplegado(p), 0), [active]);
 
   const setAccField = (brk, k) => (v) => setAccounts((a) => ({ ...a, [brk]: { ...a[brk], [k]: v } }));
   const setPos = (id, k, v) => setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, [k]: v } : p)));
@@ -2484,15 +2339,38 @@ function App() {
     const id = newId();
     const b = broker === "Todos" ? (brokers[0] || "IBKR") : broker;
     const defNat = blockId === 2 ? "CRED" : blockId === 3 ? "DEF" : "ACC";
-    setPositions((ps) => [...ps, { id, block: blockId, broker: b, tkr: "", tipo: "", nat: defNat, strike: "", right: "P", expiry: "", qty: "", bep: "", prima: "", last: "", mktValue: "", riesgo: "", factor: "1", margen: "", margenPct: "100", margenModo: "PCT", mktModo: "AUTO", pnlModo: "AUTO", pnl: "" }]);
+    const today = new Date().toISOString().slice(0, 10);
+    setPositions((ps) => [...ps, { id, block: blockId, broker: b, tkr: "", tipo: "", nat: defNat, strike: "", right: "P", expiry: "", qty: "", bep: "", prima: "", comision: "", last: "", mktValue: "", riesgo: "", factor: "1", margen: "", margenPct: "100", margenModo: "PCT", mktModo: "AUTO", pnlModo: "AUTO", pnl: "", entryDate: today, rollChain: [], closed: false, closeDate: "", closePrice: "", closeComision: "" }]);
     setEditSet((s) => new Set(s).add(id));
   };
   const delPos = (id) => setPositions((ps) => ps.filter((p) => p.id !== id));
+  /* roll de opción corta: se hace directamente desde la posición del bloque. Se piden los dos números reales
+     del roll — coste de recompra del contrato viejo y crédito del contrato nuevo — más su comisión. El neto
+     (crédito nuevo − recompra − comisión) se acumula sobre la prima total (BEP sigue funcionando igual) y
+     además queda archivado en rollChain con su fecha: en Movimientos → Primas aparecen las dos patas (recompra
+     y nueva entrada) como cash de prima, y en Movimientos → MTM aparece el neto de ESE roll como resultado
+     realizado (negativo si se pagó más al recomprar de lo que se cobró en la nueva entrada). */
+  const rollPos = (id, { date, strike, expiry, buybackCost, newCredit, comision }) => {
+    setPositions((ps) => ps.map((p) => {
+      if (p.id !== id) return p;
+      const netDelta = n(newCredit) - n(buybackCost) - n(comision);
+      const prevLeg = { date: date || new Date().toISOString().slice(0, 10), prevStrike: p.strike, prevExpiry: p.expiry, prevPrima: p.prima, buybackCost: n(buybackCost), newCredit: n(newCredit), comision: n(comision) };
+      return { ...p, rollChain: [...(p.rollChain || []), prevLeg], strike, expiry, prima: String(n(p.prima) + netDelta) };
+    }));
+  };
+  /* cierre de posición: acciones (o ETF/collar) solo necesitan precio de venta → resultado realizado va a MTM;
+     opciones necesitan precio de recompra → cash de prima va a Primas. En ambos casos la posición se marca
+     "closed" pero NO se borra (así conserva su historial para Movimientos) y deja de contar en riesgo/exposición. */
+  const closePos = (id, { date, price, comision }) => {
+    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision } : p)));
+  };
+  const reopenPos = (id) => setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: false } : p)));
   const clearAll = () => {
     if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
     setPositions([]); setEditSet(new Set()); setConfirmClear(false);
     setAccounts((a) => { const next = {}; Object.keys(a).forEach((b) => { next[b] = emptyAcc(); }); return next; });
   };
+
 
   const selectTab = (id) => {
     if (id === activeTab) { setEditSet(new Set()); return; } // re-tap del bloque activo → cierra todas las ediciones abiertas
@@ -2507,9 +2385,9 @@ function App() {
 
   const blockTotals = useMemo(() => {
     const t = {};
-    BLOCKS.forEach((b) => { t[b.id] = filtered.filter((p) => p.block === b.id).reduce((s, p) => s + capDesplegado(p), 0); });
+    BLOCKS.forEach((b) => { t[b.id] = active.filter((p) => p.block === b.id).reduce((s, p) => s + capDesplegado(p), 0); });
     return t;
-  }, [filtered]);
+  }, [active]);
 
   /* agrega posiciones del mismo ticker (una posición en acción + opción cuenta como UNA sola porción) */
   const aggregateByTicker = (pool, getValue) => {
@@ -2524,7 +2402,7 @@ function App() {
   };
 
   const chartData = useMemo(() => {
-    const pool = isBlockTab ? blockPositions : filtered;
+    const pool = isBlockTab ? blockPositions.filter((p) => !p.closed) : active;
     let denom = nlv, denomLabel = "NLV", getValue = (p) => capDesplegado(p);
     if (chartScope === "Bloque") { denom = blockTotals[activeTab] || 0; denomLabel = "del " + (blk ? blk.name : ""); }
     else if (chartScope === "MKT VL") { denom = mktvl; denomLabel = "MKT VL"; }
@@ -2534,13 +2412,13 @@ function App() {
     const poolTotal = agg.reduce((s, x) => s + x.value, 0);
     const slices = agg.map((x, i) => ({ ...x, color: PALETTE[i % PALETTE.length], pctAbs: denom ? x.value / denom : NaN }));
     return { slices, total: poolTotal, denomPct: denom ? poolTotal / denom : NaN, denomLabel };
-  }, [chartScope, activeTab, filtered, nlv, mktvl, margin, blockPositions, blockTotals, isBlockTab, blk, isDark]);
+  }, [chartScope, activeTab, active, nlv, mktvl, margin, blockPositions, blockTotals, isBlockTab, blk, isDark]);
 
   const scopeOptions = isBlockTab ? ["Bloque", "MKT VL", "NLV", "Margen"] : ["MKT VL", "NLV", "Margen"];
 
   const exposureRows = useMemo(() => {
     const map = {};
-    filtered.forEach((p) => {
+    active.forEach((p) => {
       if (!p.tkr) return;
       if (!map[p.tkr]) map[p.tkr] = { tkr: p.tkr, riesgo: 0, plausible: 0, margen: 0, pnl: 0, pnlBasis: 0, last: 0, byBlock: {}, items: [] };
       map[p.tkr].riesgo += capDesplegado(p);
@@ -2589,11 +2467,11 @@ function App() {
         detailRows,
       };
     });
-  }, [filtered, mktvl, nlv, margin, isDark]);
+  }, [active, mktvl, nlv, margin, isDark]);
 
   const vencimientosRows = useMemo(() => {
     const map = {};
-    filtered.forEach((p) => {
+    active.forEach((p) => {
       if (!isOptionNat(p) || !p.expiry) return;
       if (!map[p.expiry]) map[p.expiry] = { expiry: p.expiry, riesgo: 0, items: [] };
       map[p.expiry].riesgo += capDesplegado(p);
@@ -2623,7 +2501,7 @@ function App() {
       const dte = Math.round((new Date(r.expiry + "T00:00:00") - today) / 86400000);
       return { ...r, detailRows, dte };
     });
-  }, [filtered]);
+  }, [active]);
 
   /* ---------- exportar cartera completa (ignora filtro de broker) para pegar y pedir feedback ---------- */
   const [exportOpen, setExportOpen] = useState(false);
@@ -2751,7 +2629,7 @@ function App() {
   };
 
   return (
-    <div ref={rootRef} style={{ minHeight: "100vh", background: T.bg, fontFamily: T.sans, color: T.ink, padding: "18px 14px 50px" }}>
+    <div ref={rootRef} style={{ minHeight: "100vh", background: T.bg, fontFamily: T.sans, color: T.ink, padding: "18px 14px 100px" }}>
       <style>{`
         input[type=number]::-webkit-outer-spin-button,input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none;margin:0;}
         input[type=number]{-moz-appearance:textfield;}
@@ -2768,8 +2646,8 @@ function App() {
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 8 }}>
           <div>
-            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : "Comparador"}</div>
-            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : "Sizing e impacto de margen"}</div>
+            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : view === "movimientos" ? "Movimientos" : "Comparador"}</div>
+            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : view === "movimientos" ? "Primas y resultado realizado (MTM)" : "Sizing e impacto de margen"}</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}>
             <button onClick={toggleDark} aria-label="Modo oscuro/claro" style={{ background: T.card, border: "none", borderRadius: 14, width: 36, height: 36, fontSize: 15, cursor: "pointer", boxShadow: T.shadow, display: "flex", alignItems: "center", justifyContent: "center" }}>{isDark ? "☀️" : "🌙"}</button>
@@ -2782,15 +2660,6 @@ function App() {
           </div>
         </div>
 
-        {/* SWITCHER DE APP */}
-        <div style={{ display: "flex", gap: 6, background: T.card, borderRadius: 18, padding: 6, marginBottom: 14, boxShadow: T.shadow }}>
-          {[["bloques", "Portfolio"], ["comparador", "Comparador"]].map(([id, label]) => (
-            <button key={id} onClick={() => selectView(id)} style={{
-              flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 0", fontSize: 14, fontWeight: 800,
-              background: view === id ? T.dark : "transparent", color: view === id ? "#fff" : T.sub,
-            }}>{label}</button>
-          ))}
-        </div>
         {updateNotice && (
           <div style={{ background: T.tileGreen, borderRadius: 14, padding: "10px 12px", marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700, lineHeight: 1.45 }}>App actualizada a v{updateNotice.to} (antes {updateNotice.from}). Se guardó una copia automática de tus datos por seguridad.</div>
@@ -2804,6 +2673,7 @@ function App() {
         {refreshMsg && <div style={{ fontSize: 12, color: T.green, fontWeight: 700, marginBottom: 12, background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>{refreshMsg}</div>}
 
         {/* SELECTOR BROKER */}
+        {view !== "movimientos" && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "stretch" }}>
           <div style={{ background: T.dark, borderRadius: 18, padding: 6, display: "flex", gap: 6, flex: 1, overflowX: "auto" }}>
             {(brokers.length > 1 ? ["Todos", ...brokers] : brokers).map((b) => (
@@ -2815,8 +2685,10 @@ function App() {
           </div>
           {view === "bloques" && <button onClick={() => { setBrokerModalOpen(true); setNewBrokerName(""); setRemoveTarget({}); }} aria-label="Gestionar brokers" style={{ flexShrink: 0, background: T.card, border: "none", borderRadius: 16, padding: "0 14px", fontSize: 18, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>⚙</button>}
         </div>
+        )}
 
         {/* CUENTA */}
+        {view !== "movimientos" && (
         <div style={{ background: T.card, borderRadius: 24, padding: 16, marginBottom: 16, boxShadow: T.shadow }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>
             Cuenta · {broker === "Todos" ? "consolidado" : broker}
@@ -2876,6 +2748,7 @@ function App() {
             ))}
           </div>
         </div>
+        )}
 
         {view === "comparador" && (
           <ComparadorContent nlv={nlv} margin={margin} el={el} brokerLabel={broker === "Todos" ? "consolidado " + brokers.join(" + ") : broker}
@@ -2889,7 +2762,7 @@ function App() {
             <div style={{ fontSize: 13, fontWeight: 700, color: "#B9C2CC", letterSpacing: 0.5, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 5 }}>
               Riesgo total · P&L <InfoDot onClick={() => setInfo("riesgo")} />
             </div>
-            <div style={{ fontSize: 13.5, color: "#DDE3E9", marginTop: 4 }}>{filtered.length} posiciones · ${money(totalRiesgo)} riesgo total</div>
+            <div style={{ fontSize: 13.5, color: "#DDE3E9", marginTop: 4 }}>{active.length} posiciones · ${money(totalRiesgo)} riesgo total</div>
           </div>
           <div style={{ fontSize: 26, fontWeight: 800, color: totalPnl >= 0 ? T.green : T.red, letterSpacing: -0.5, flexShrink: 0 }}>{signMoney(totalPnl)}</div>
         </div>
@@ -2908,25 +2781,25 @@ function App() {
         {/* CONTENIDO DE LA PESTAÑA */}
         {isBlockTab ? (
           <BlockCard blk={blk} positions={blockPositions} nlv={nlv} showPnl={showPnl} togglePnl={togglePnl} brokers={brokers}
-            editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} />
+            editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} rollPos={rollPos} closePos={closePos} reopenPos={reopenPos} />
         ) : activeTab === "rendimiento" ? (
           <RendimientoCard snapshots={snapshots} flows={flows} onSave={saveSnapshot} onDelete={deleteSnapshot} />
         ) : activeTab === "aportaciones" ? (
           <AportacionesCard flows={flows} setFlows={setFlows} brokers={brokers} />
-        ) : activeTab === "movimientos" ? (
-          <MovimientosCard movs={movimientos} setMovs={setMovimientos} snapshots={snapshots} onOpen={setInfo} />
         ) : activeTab === "vencimientos" ? (
           <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />
         ) : (
           <ExposureCard rows={exposureRows} onOpen={setInfo} showPnl={showPnl} togglePnl={togglePnl} />
         )}
 
-        {/* DISTRIBUCIÓN — debajo del contenido del bloque (no aplica en Rendimiento, Aportaciones, Vencimientos ni Movimientos) */}
-        {activeTab !== "rendimiento" && activeTab !== "aportaciones" && activeTab !== "vencimientos" && activeTab !== "movimientos" && (
+        {/* DISTRIBUCIÓN — debajo del contenido del bloque (no aplica en Rendimiento, Aportaciones ni Vencimientos) */}
+        {activeTab !== "rendimiento" && activeTab !== "aportaciones" && activeTab !== "vencimientos" && (
           <ChartCard scope={chartScope} setScope={setScopeAndReset} scopeOptions={scopeOptions} slices={chartData.slices} total={chartData.total} denomPct={chartData.denomPct} denomLabel={chartData.denomLabel} selected={selectedSlice} onSelect={setSelectedSlice} />
         )}
 
         </>)}
+
+        {view === "movimientos" && <MovimientosView positions={filtered} />}
 
         <div style={{ textAlign: "center", fontSize: 14, fontWeight: 800, color: T.sub, letterSpacing: 0.3, margin: "22px 0 4px" }}>💸Galo Will Make You Rich💸</div>
         <div style={{ textAlign: "center", fontSize: 11, fontWeight: 700, color: T.sub, opacity: 0.7, marginBottom: 4 }}>
@@ -3088,6 +2961,21 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* NAV INFERIOR FLOTANTE */}
+      <div style={{ position: "fixed", left: 0, right: 0, bottom: 18, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
+        <div style={{ display: "flex", gap: 4, background: "rgba(28,25,20,0.92)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", borderRadius: 30, padding: "8px 8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)", pointerEvents: "auto" }}>
+          {[["bloques", "📊", "Portfolio"], ["movimientos", "🔁", "Movimientos"], ["comparador", "⚖️", "Comparador"]].map(([id, icon, label]) => (
+            <button key={id} onClick={() => selectView(id)} style={{
+              display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
+              background: view === id ? "rgba(255,255,255,0.14)" : "transparent", borderRadius: 22, padding: "8px 16px", minWidth: 76,
+            }}>
+              <span style={{ fontSize: 19 }}>{icon}</span>
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: view === id ? T.purple : "#fff" }}>{label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
