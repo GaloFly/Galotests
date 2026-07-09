@@ -39,17 +39,23 @@ const T_LIGHT = {
 };
 /* paleta oscura: mismo carácter cálido, luminancia invertida — se activa a mano con el icono ☀️/🌙, por defecto claro */
 const T_DARK = {
-  bg: "#17140F", card: "#221D16", tile: "#2B2419",
-  tileGreen: "#16291D", tileAmber: "#2E2510", tileRed: "#2E1917", tilePurple: "#211D34",
-  ink: "#F0EBE0", sub: "#9C948A",
-  green: "#34C874", purple: "#A99AF0", gold: "#E0B84A", orange: "#F0995A", red: "#F2716A",
-  dark: "#3A3327", line: "#3A342A", shadow: "0 6px 20px rgba(0,0,0,0.35)",
+  bg: "#0A0A0A", card: "#161616", tile: "#1C1C1E",
+  tileGreen: "#0F2318", tileAmber: "#2A2110", tileRed: "#2A1512", tilePurple: "#1B1826",
+  ink: "#FFFFFF", sub: "#8E8E93",
+  green: "#20C46E", purple: "#A99AF0", gold: "#F0B90B", orange: "#F7931A", red: "#FF4D4D",
+  dark: "#2C2C2E", line: "#26262A", shadow: "0 6px 20px rgba(0,0,0,0.55)",
   sans: "-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,'Segoe UI',Roboto,sans-serif",
 };
 /* T, HEX, BLOCKS, TABS, PALETTE dependen todos del tema activo. Son "let" (no "const") y se reconstruyen
    entera vía applyTheme() cuando cambia el modo claro/oscuro del sistema — ver el listener en App(). */
-let T, HEX, BLOCKS, TABS, PALETTE;
+let T, HEX, BLOCKS, TABS, PALETTE, DARK = false;
+function hexToRgba(hex, a) {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0, 2), 16), g = parseInt(h.substring(2, 4), 16), b = parseInt(h.substring(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
 function applyTheme(dark) {
+  DARK = dark;
   T = dark ? T_DARK : T_LIGHT;
   HEX = { green: T.green, amber: T.gold, red: T.red, purple: T.purple, orange: T.orange, muted: T.sub };
   PALETTE = [T.green, T.purple, T.orange, T.red, T.gold, "#4A90D9", "#D96BA0", "#5FBAA3", "#B08D57", "#7E8CE0", "#E0A85F", "#6BAF6B", "#C4739B", "#5C9AC7"];
@@ -74,8 +80,9 @@ const SEED_BROKERS = ["IBKR"];
 const emptyAcc = () => ({ cash: "0", margin: "0" });
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
 
-const Z_NLV = [{ to: 0.25, color: "rgba(224,86,77,0.22)" }, { to: 0.40, color: "rgba(195,148,41,0.26)" }, { to: 0.60, color: "rgba(27,163,76,0.20)" }];
-const Z_MRGN = [{ to: 0.5, color: "rgba(224,86,77,0.22)" }, { to: 1.0, color: "rgba(195,148,41,0.26)" }, { to: 1.5, color: "rgba(27,163,76,0.20)" }];
+function zoneAlpha(base) { return DARK ? Math.min(0.55, base + 0.24) : base; }
+function Z_NLV() { return [{ to: 0.25, color: hexToRgba(T.red, zoneAlpha(0.22)) }, { to: 0.40, color: hexToRgba(T.gold, zoneAlpha(0.26)) }, { to: 0.60, color: hexToRgba(T.green, zoneAlpha(0.20)) }]; }
+function Z_MRGN() { return [{ to: 0.5, color: hexToRgba(T.red, zoneAlpha(0.22)) }, { to: 1.0, color: hexToRgba(T.gold, zoneAlpha(0.26)) }, { to: 1.5, color: hexToRgba(T.green, zoneAlpha(0.20)) }]; }
 const M_NLV_MINI = [{ at: 0.25, label: "25" }, { at: 0.40, label: "40" }, { at: 0.60, label: "60" }];
 const M_MRGN_MINI = [{ at: 0.5, label: "50" }, { at: 1.0, label: "100" }, { at: 1.5, label: "150" }];
 const M_NLV_FULL = [{ at: 0.25, label: "25% suelo" }, { at: 0.40, label: "40% obj" }, { at: 0.60, label: "60%" }];
@@ -105,7 +112,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.10";
+const APP_VERSION = "4.25";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1178,18 +1185,21 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
   const [rollBuyback, setRollBuyback] = useState("");
   const [rollCredit, setRollCredit] = useState("");
   const [rollComision, setRollComision] = useState("");
-  const openRoll = () => { setRollDate(new Date().toISOString().slice(0, 10)); setRollStrike(p.strike || ""); setRollExpiry(""); setRollBuyback(""); setRollCredit(""); setRollComision(""); setRolling(true); };
+  const [rollIvr, setRollIvr] = useState("");
+  const [rollNote, setRollNote] = useState("");
+  const openRoll = () => { setRollDate(new Date().toISOString().slice(0, 10)); setRollStrike(p.strike || ""); setRollExpiry(""); setRollBuyback(""); setRollCredit(""); setRollComision(""); setRollIvr(""); setRollNote(""); setRolling(true); };
   const confirmRoll = () => {
-    onRoll({ date: rollDate, strike: rollStrike, expiry: rollExpiry, buybackCost: rollBuyback, newCredit: rollCredit, comision: rollComision });
+    onRoll({ date: rollDate, strike: rollStrike, expiry: rollExpiry, buybackCost: rollBuyback, newCredit: rollCredit, comision: rollComision, ivr: rollIvr, note: rollNote });
     setRolling(false);
   };
   const [closing, setClosing] = useState(false);
   const [closeDateV, setCloseDateV] = useState("");
   const [closePriceV, setClosePriceV] = useState("");
   const [closeComisionV, setCloseComisionV] = useState("");
-  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setClosing(true); };
+  const [closeNoteV, setCloseNoteV] = useState("");
+  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setCloseNoteV(""); setClosing(true); };
   const confirmClose = () => {
-    onClose({ date: closeDateV, price: closePriceV, comision: closeComisionV });
+    onClose({ date: closeDateV, price: closePriceV, comision: closeComisionV, note: closeNoteV });
     setClosing(false);
   };
   return (
@@ -1283,6 +1293,7 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
             <EditField label="BEP" prefix="$" value={p.bep} onChange={onChange("bep")} />
           ))}
           {!cash && <EditField label="Comisión (entrada)" prefix="$" value={p.comision} onChange={onChange("comision")} />}
+          {isOptionNat(p) && <EditField label="IVR al abrir" value={p.ivr} onChange={onChange("ivr")} />}
           {!cash && <EditField label="Último (precio actual)" prefix="$" value={p.last} onChange={onChange("last")} />}
           {!cash && bepAutoStrat(p) && (
             <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1381,8 +1392,8 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
               {!rolling ? (
                 <button type="button" onClick={openRoll} style={{ width: "100%", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>🔄 Rolar esta posición (misma entrada)</button>
               ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, gridColumn: "span 2" }}>El histórico ({optionDetail(p)}) queda guardado en la cadena. Precios por acción — se multiplican ×{n(p.qty) || 100} al calcular el cash</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
+                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600 }}>El histórico ({optionDetail(p)}) queda guardado en la cadena. Precios por acción — se multiplican ×{n(p.qty) || 100} al calcular el cash</div>
                   <div>
                     <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha del roll</span>
                     <input type="date" value={rollDate} onChange={(e) => setRollDate(e.target.value)}
@@ -1394,10 +1405,12 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
                     <input type="date" value={rollExpiry} onChange={(e) => setRollExpiry(e.target.value)}
                       style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: rollExpiry ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
                   </div>
-                  <EditField label="Coste recompra (contrato viejo)" prefix="$" value={rollBuyback} onChange={setRollBuyback} />
-                  <EditField label="Crédito nueva entrada" prefix="$" value={rollCredit} onChange={setRollCredit} />
-                  <EditField label="Comisión del roll" prefix="$" value={rollComision} onChange={setRollComision} span={2} />
-                  <div style={{ gridColumn: "span 2", display: "flex", gap: 8 }}>
+                  <EditField label="Prima recompra (por acción)" prefix="$" value={rollBuyback} onChange={setRollBuyback} />
+                  <EditField label="Prima nueva venta (por acción)" prefix="$" value={rollCredit} onChange={setRollCredit} />
+                  <EditField label="Comisión" prefix="$" value={rollComision} onChange={setRollComision} />
+                  <EditField label="IVR del roll" value={rollIvr} onChange={setRollIvr} />
+                  <EditField label="Comentario (feedback / motivo del roll)" value={rollNote} onChange={setRollNote} text />
+                  <div style={{ display: "flex", gap: 8 }}>
                     <button type="button" onClick={() => setRolling(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
                     <button type="button" onClick={confirmRoll} disabled={!rollStrike || !rollExpiry || !rollDate} style={{ flex: 1, background: T.green, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!rollStrike || !rollExpiry || !rollDate) ? 0.5 : 1 }}>Confirmar roll</button>
                   </div>
@@ -1419,6 +1432,7 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
                   </div>
                   <EditField label={opt ? "Precio de recompra" : "Precio de venta"} prefix="$" value={closePriceV} onChange={setClosePriceV} />
                   <EditField label="Comisión de cierre" prefix="$" value={closeComisionV} onChange={setCloseComisionV} span={2} />
+                  <EditField label="Comentario (feedback / motivo del cierre)" value={closeNoteV} onChange={setCloseNoteV} text span={2} />
                   <div style={{ gridColumn: "span 2", display: "flex", gap: 8 }}>
                     <button type="button" onClick={() => setClosing(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
                     <button type="button" onClick={confirmClose} disabled={!closeDateV || !closePriceV} style={{ flex: 1, background: T.red, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!closeDateV || !closePriceV) ? 0.5 : 1 }}>Confirmar cierre</button>
@@ -1504,22 +1518,49 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
   );
 }
 
-/* ---------- MOVIMIENTOS: vista de nivel superior (no es pestaña de bloque). Las posiciones se crean y
-   editan siempre desde su bloque (fecha de entrada, roll, cierre); aquí solo se reconstruye su historial
-   en dos sub-vistas:
-   · Primas — cash de prima de cada pata: apertura, recompra/nueva entrada de cada roll, cierre de opción.
-     Solo posiciones con prima real (nat Crédito, o Débito con prima automática tipo Long Call Leaps).
-     El cash de cada pata es precio por acción × cantidad (1 contrato = 100 acciones).
-   · MTM — resultado REALIZADO: el neto de cada roll (crédito nuevo − recompra − comisión, puede salir
-     negativo si se pagó más al recomprar de lo que se cobró) y el resultado de cerrar una posición de
-     acción/collar (precio de venta − BEP) × cantidad − comisión. ---------- */
-function MovimientosView({ positions }) {
+/* ---------- MOVIMIENTOS: vista de nivel superior. Las posiciones se crean/editan/rolan/cierran desde su
+   bloque; aquí solo se reconstruye su historial en tres sub-vistas:
+   · Primas — cash de cada evento (apertura, roll neto, cierre). Cierre de opción corta = recompra →
+     negativo; expiración sin valor = cierre a precio 0. Cada línea es fecha·ticker·fee·prima y se expande
+     al pulsar mostrando strike y P/C. Totales por mes, por año y acumulado.
+   · MTM — resultado REALIZADO de cada roll y cierre: precio de entrada de la pata que se cierra vs precio
+     de recompra/venta, con su fee visible en cada línea.
+   · Estrategias — TODAS las posiciones (abiertas y cerradas) archivadas por tipo: Acciones, Covered
+     Calls, Short Puts, PMCC, DC/DD, Otras. Selector Abiertas/Cerradas. Al pulsar una posición se expande
+     con: cadena de rolls, prima acumulada, BEP, ROM (prima/riesgo), DTE, DIT e IVR de apertura. ---------- */
+function MovimientosView({ positions, reopenPos }) {
   const [sub, setSub] = useState("primas");
+  const [stratCat, setStratCat] = useState("Acciones");
+  const [stratStatus, setStratStatus] = useState("Abiertas");
+  const [expanded, setExpanded] = useState(new Set());
+  const toggleExpand = (id) => setExpanded((s) => { const x = new Set(s); x.has(id) ? x.delete(id) : x.add(id); return x; });
 
   const openingPrimaPerShare = (p) => {
     const chain = p.rollChain || [];
     return chain.length > 0 ? n(chain[0].prevPrima) : n(p.prima);
   };
+  const openingStrike = (p) => {
+    const chain = p.rollChain || [];
+    return chain.length > 0 ? chain[0].prevStrike : p.strike;
+  };
+  const strikeAfterRoll = (p, idx) => {
+    const chain = p.rollChain || [];
+    return idx + 1 < chain.length ? chain[idx + 1].prevStrike : p.strike;
+  };
+  const openingExpiry = (p) => {
+    const chain = p.rollChain || [];
+    return chain.length > 0 ? chain[0].prevExpiry : p.expiry;
+  };
+  const expiryAfterRoll = (p, idx) => {
+    const chain = p.rollChain || [];
+    return idx + 1 < chain.length ? chain[idx + 1].prevExpiry : p.expiry;
+  };
+  const qtyLabelOf = (p) => {
+    if (!isOptionNat(p)) return n(p.qty) ? String(n(p.qty)) : "";
+    const c = n(p.qty) / 100;
+    return Number.isInteger(c) ? String(c) : String(n(p.qty));
+  };
+  const dirSign = (p) => (natOf(p) === "CRED" ? -1 : 1); // corta: cerrar/recomprar es pagar
 
   const primaEvents = [];
   const mtmEvents = [];
@@ -1528,103 +1569,367 @@ function MovimientosView({ positions }) {
     const qty = n(p.qty);
     if (isOptionNat(p)) {
       const autoStrat = bepAutoStrat(p);
+      const chain = p.rollChain || [];
       if (autoStrat && p.entryDate) {
         const sign = autoStrat === "CREDIT" ? 1 : -1;
-        const cash = sign * openingPrimaPerShare(p) * qty - n(p.comision);
-        primaEvents.push({ id: p.id + "-open", date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash });
+        const fee = n(p.comision);
+        const cash = sign * openingPrimaPerShare(p) * qty - fee;
+        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: bepAutoStrat(p) === "CREDIT" ? n(openingStrike(p)) - n(openingPrimaPerShare(p)) : n(openingStrike(p)) + n(openingPrimaPerShare(p)) });
       }
-      (p.rollChain || []).forEach((r, idx) => {
-        primaEvents.push({ id: p.id + "-rb" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll · recompra", cash: -(n(r.buybackCost) * qty) - n(r.comision) });
-        primaEvents.push({ id: p.id + "-rn" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll · nueva entrada", cash: n(r.newCredit) * qty });
-        const net = (n(r.newCredit) - n(r.buybackCost)) * qty - n(r.comision);
-        mtmEvents.push({ id: p.id + "-rollnet" + idx, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll neto", cash: net });
+      chain.forEach((r, idx) => {
+        const fee = n(r.comision);
+        const cashRoll = (n(r.newCredit) - n(r.buybackCost)) * qty - fee;
+        primaEvents.push({ id: p.id + "-roll" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: cashRoll, fee, strike: strikeAfterRoll(p, idx), right: p.right, prevStrike: r.prevStrike, qty: qtyLabelOf(p), expiry: expiryAfterRoll(p, idx), note: r.note || "" });
+        const legBefore = idx === 0 ? openingPrimaPerShare(p) : n(chain[idx - 1].newCredit);
+        const realized = dirSign(p) * (n(r.buybackCost) - legBefore) * qty - fee;
+        mtmEvents.push({ id: p.id + "-rollmtm" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: realized, fee, strike: r.prevStrike, right: p.right, qty: qtyLabelOf(p), expiry: r.prevExpiry, note: r.note || "" });
       });
       if (p.closed && p.closePrice !== "" && p.closePrice != null) {
-        const sign = natOf(p) === "CRED" ? -1 : 1;
-        const cash = sign * n(p.closePrice) * qty - n(p.closeComision);
-        primaEvents.push({ id: p.id + "-close", date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash });
+        const fee = n(p.closeComision);
+        const cashClose = dirSign(p) * n(p.closePrice) * qty - fee;
+        primaEvents.push({ id: p.id + "-close", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: n(p.closePrice) === 0 ? "Expirada" : "Cierre", cash: cashClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "" });
+        const legEntry = chain.length > 0 ? n(chain[chain.length - 1].newCredit) : openingPrimaPerShare(p);
+        const realizedClose = dirSign(p) * (n(p.closePrice) - legEntry) * qty - fee;
+        mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: n(p.closePrice) === 0 ? "Expirada" : "Cierre", cash: realizedClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "" });
       }
     } else if ((natOf(p) === "ACC" || natOf(p) === "COLLAR") && p.closed && p.closePrice !== "" && p.closePrice != null) {
-      const net = (n(p.closePrice) - n(effBep(p))) * qty - n(p.closeComision);
-      mtmEvents.push({ id: p.id + "-closemtm", date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash: net });
+      const fee = n(p.closeComision);
+      const net = (n(p.closePrice) - n(effBep(p))) * qty - fee;
+      mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash: net, fee, strike: "", right: "", qty: qtyLabelOf(p), bep: n(effBep(p)), note: p.closeNote || "" });
     }
   });
 
   const events = sub === "primas" ? primaEvents : mtmEvents;
   events.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
-  const groups = {};
+  const monthGroups = {};
+  const yearTotals = {};
   events.forEach((e) => {
-    const key = e.date ? e.date.slice(0, 7) : "sin-fecha";
-    if (!groups[key]) groups[key] = { items: [], total: 0 };
-    groups[key].items.push(e);
-    groups[key].total += e.cash;
+    const mKey = e.date ? e.date.slice(0, 7) : "sin-fecha";
+    const yKey = e.date ? e.date.slice(0, 4) : "sin-fecha";
+    if (!monthGroups[mKey]) monthGroups[mKey] = { items: [], total: 0, fees: 0 };
+    monthGroups[mKey].items.push(e);
+    monthGroups[mKey].total += e.cash;
+    monthGroups[mKey].fees += e.fee || 0;
+    if (!yearTotals[yKey]) yearTotals[yKey] = { total: 0, fees: 0 };
+    yearTotals[yKey].total += e.cash;
+    yearTotals[yKey].fees += e.fee || 0;
   });
-  const monthKeys = Object.keys(groups).sort();
+  const monthKeys = Object.keys(monthGroups).sort();
   const grandTotal = events.reduce((s, e) => s + e.cash, 0);
+  const grandFees = events.reduce((s, e) => s + (e.fee || 0), 0);
   const MESES = ["ENE", "FEB", "MAR", "ABR", "MAY", "JUN", "JUL", "AGO", "SEP", "OCT", "NOV", "DIC"];
   const monthLabel = (key) => { if (key === "sin-fecha") return "Sin fecha"; const [y, m] = key.split("-"); return MESES[Number(m) - 1] + " " + y; };
+
+  /* ---------- Estrategias: todas las posiciones archivadas por tipo ---------- */
+  const STRAT_CATS = ["Acciones", "Covered Calls", "Short Puts", "PMCC", "DC/DD", "Otras"];
+  const categoryOf = (p) => {
+    const t = (p.tipo || "").toLowerCase();
+    if (isCashNat(p)) return null; // cash no es una estrategia
+    if (natOf(p) === "ACC") return "Acciones";
+    if (t === "pmcc") return "PMCC";
+    if (["dc", "dd", "diagonal", "calendar"].includes(t)) return "DC/DD";
+    if (t === "short put") return "Short Puts";
+    if (t === "short call") return "Covered Calls";
+    /* cualquier opción corta (nat Crédito) de CUALQUIER bloque cae en su estrategia por el right,
+       aunque la etiqueta de estrategia esté vacía o sea otra: P → Short Puts, C → Covered Calls */
+    if (natOf(p) === "CRED") return p.right === "C" ? "Covered Calls" : "Short Puts";
+    return "Otras";
+  };
+  const catCount = (c, closed) => positions.filter((p) => categoryOf(p) === c && !!p.closed === closed).length;
+  const stratItems = positions
+    .filter((p) => categoryOf(p) === stratCat && !!p.closed === (stratStatus === "Cerradas"))
+    .sort((a, b) => ((b.closeDate || b.entryDate || "") < (a.closeDate || a.entryDate || "") ? -1 : 1));
+
+  const primaSumOf = (p) => primaEvents.filter((e) => e.posId === p.id).reduce((s, e) => s + e.cash, 0);
+  const mtmSumOf = (p) => mtmEvents.filter((e) => e.posId === p.id).reduce((s, e) => s + e.cash, 0);
+  const daysBetween = (d0, d1) => (!d0 || !d1) ? NaN : Math.round((new Date(d1 + "T00:00:00") - new Date(d0 + "T00:00:00")) / 86400000);
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const shortDate = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${d}/${m}/${y.slice(-2)}`; };
 
   return (
     <>
       <div style={{ display: "flex", gap: 6, background: T.card, borderRadius: 18, padding: 6, marginBottom: 14, boxShadow: T.shadow }}>
-        {[["primas", "💰 Primas"], ["mtm", "📊 MTM"]].map(([id, label]) => (
+        {[["primas", "💰 Primas"], ["mtm", "📊 MTM"], ["estrategias", "🗂️ Estrategias"]].map(([id, label]) => (
           <button key={id} onClick={() => setSub(id)} style={{
-            flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 0", fontSize: 14, fontWeight: 800,
+            flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 0", fontSize: 12.5, fontWeight: 800,
             background: sub === id ? T.dark : "transparent", color: sub === id ? "#fff" : T.sub,
           }}>{label}</button>
         ))}
       </div>
 
-      <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
-        <div style={{ marginBottom: 12 }}>
-          <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{sub === "primas" ? "Primas" : "MTM · resultado realizado"}</div>
-          <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, marginTop: 1 }}>
-            {sub === "primas" ? "Cash de prima de cada apertura, roll y cierre de opción. Se editan desde cada bloque." : "Resultado neto de cada roll y del cierre de acciones/collar. Negativo si el roll costó más de lo que se cobró."}
-          </div>
-        </div>
-
-        {events.length === 0 && (
-          <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "8px 0" }}>
-            {sub === "primas" ? "Aún no hay primas registradas. Se generan al abrir, rolar o cerrar una posición de opciones con fecha." : "Aún no hay resultado realizado. Se genera al rolar una opción o cerrar una posición de acción/collar."}
-          </div>
-        )}
-
-        {monthKeys.map((key) => (
-          <div key={key} style={{ marginTop: 4 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", margin: "12px 0 2px" }}>
-              <span style={{ fontSize: 11, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5 }}>{monthLabel(key)}</span>
-              <span style={{ fontSize: 12, fontWeight: 800, color: groups[key].total >= 0 ? T.green : T.red }}>{signMoney(groups[key].total)}</span>
+      {sub !== "estrategias" ? (
+        <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{sub === "primas" ? "Primas" : "MTM · resultado realizado"}</div>
+            <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, marginTop: 1 }}>
+              {sub === "primas" ? "Cash de cada apertura, roll (neto) y cierre. Toca una línea para ver strike y detalle." : "Ganancia/pérdida realizada de cada roll y cierre, comparando contra el precio de entrada de esa pata. Fee incluido en el neto y visible por línea."}
             </div>
-            {groups[key].items.map((e) => {
-              const blk = BLOCKS.find((b) => b.id === e.block);
-              return (
-                <div key={e.id} style={{ borderTop: `1px solid ${T.line}`, padding: "8px 0", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                      <span style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>{e.tkr || "—"}</span>
-                      <span style={{ fontSize: 9.5, fontWeight: 800, color: e.kind.startsWith("Roll") ? T.purple : T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>{e.kind}</span>
-                      {blk && <span style={{ fontSize: 9.5, fontWeight: 800, color: blk.color, background: blk.bg, borderRadius: 6, padding: "2px 5px" }}>{blk.name.replace("Bloque ", "B")}</span>}
+          </div>
+
+          {events.length === 0 && (
+            <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "8px 0" }}>
+              {sub === "primas" ? "Aún no hay primas registradas. Se generan al abrir, rolar o cerrar una posición de opciones con fecha." : "Aún no hay resultado realizado. Se genera al rolar una opción o cerrar una posición."}
+            </div>
+          )}
+
+          {events.length > 0 && (
+            <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, padding: "4px 0 6px", borderBottom: `1px solid ${T.line}` }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Ticker</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingRight: 8 }}>Fee</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingLeft: 8 }}>{sub === "primas" ? "Prima" : "P&L"}</span>
+            </div>
+          )}
+          {monthKeys.map((key) => (
+            <div key={key} style={{ marginTop: 4 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 0", fontVariantNumeric: "tabular-nums" }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>{monthLabel(key)}</span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(monthGroups[key].fees)}</span>
+                <span style={{ fontSize: 14, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(monthGroups[key].total)}</span>
+              </div>
+              {monthGroups[key].items.map((e) => {
+                const blk = BLOCKS.find((b) => b.id === e.block);
+                const open = expanded.has(e.id);
+                return (
+                  <div key={e.id} onClick={() => toggleExpand(e.id)} style={{ borderTop: `1px solid ${T.line}`, cursor: "pointer" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", padding: "9px 0", fontVariantNumeric: "tabular-nums" }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(e.date)}</span>
+                      <span style={{ fontSize: 13.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", paddingRight: 6 }}>{e.tkr || "—"}</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: T.sub, textAlign: "right", whiteSpace: "nowrap", paddingRight: 8 }}>${money2(e.fee)}</span>
+                      <span style={{ fontSize: 13.5, fontWeight: 800, color: e.cash >= 0 ? T.green : T.red, textAlign: "right", whiteSpace: "nowrap", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(e.cash)}</span>
                     </div>
-                    <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginTop: 2 }}>{[e.tipo, ibkrDate(e.date)].filter(Boolean).join(" · ")}</div>
+                    {open && (
+                      <div style={{ marginBottom: 9, background: T.tile, borderRadius: 10, padding: "9px 11px" }}>
+                        <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700 }}>
+                          {(() => { const b = BLOCKS.find((x) => x.id === e.block); return b ? <span style={{ color: b.color, fontWeight: 800 }}>{b.name.replace("Bloque ", "B")}</span> : null; })()}
+                          {e.kind === "Roll" ? " · Roll" : ""}
+                          {e.qty ? " · x " + e.qty : ""}
+                          {e.strike !== "" && e.strike != null ? " " + strikeStr(e.strike) + (e.right || "") : ""}
+                          {e.expiry ? " " + ibkrDate(e.expiry) : ""}
+                        </div>
+                        {e.note ? <div style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", marginTop: 5, lineHeight: 1.4 }}>💬 {e.note}</div> : null}
+                      </div>
+                    )}
                   </div>
-                  <div style={{ fontSize: 14.5, fontWeight: 800, color: e.cash >= 0 ? T.green : T.red, flexShrink: 0 }}>{signMoney(e.cash)}</div>
+                );
+              })}
+            </div>
+          ))}
+
+          {events.length > 0 && (
+            <div style={{ marginTop: 14, paddingTop: 12, borderTop: `2px solid ${T.line}` }}>
+              {Object.keys(yearTotals).sort().map((y) => (
+                <div key={y} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", marginBottom: 6, fontVariantNumeric: "tabular-nums" }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total {y}</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(yearTotals[y].fees)}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(yearTotals[y].total)}</span>
                 </div>
+              ))}
+              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 92px", gap: 0, alignItems: "center", paddingTop: 6, borderTop: `1px solid ${T.line}`, fontVariantNumeric: "tabular-nums" }}>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total acum.</span>
+                <span style={{ fontSize: 12.5, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(grandFees)}</span>
+                <span style={{ fontSize: 15, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(grandTotal)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>Estrategias</div>
+            <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, marginTop: 1 }}>Todas tus posiciones archivadas por tipo. Toca una para ver el detalle completo (rolls, primas, ROM, DTE, DIT, IVR).</div>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 10, overflowX: "auto" }}>
+            {STRAT_CATS.map((c) => {
+              const cnt = positions.filter((p) => categoryOf(p) === c).length;
+              return (
+                <button key={c} onClick={() => setStratCat(c)} style={{
+                  flex: "1 0 auto", border: "none", cursor: "pointer", borderRadius: 12, padding: "8px 12px", fontSize: 12, fontWeight: 800, whiteSpace: "nowrap",
+                  background: stratCat === c ? T.dark : T.tile, color: stratCat === c ? "#fff" : T.sub,
+                }}>{c}{cnt > 0 ? ` (${cnt})` : ""}</button>
               );
             })}
           </div>
-        ))}
 
-        {events.length > 0 && (
-          <div style={{ marginTop: 14, paddingTop: 12, borderTop: `2px solid ${T.line}`, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.4 }}>Total acumulado</span>
-            <span style={{ fontSize: 16, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red }}>{signMoney(grandTotal)}</span>
+          <div style={{ display: "flex", gap: 6, background: T.tile, borderRadius: 14, padding: 5, marginBottom: 14 }}>
+            {["Abiertas", "Cerradas"].map((s) => (
+              <button key={s} onClick={() => setStratStatus(s)} style={{
+                flex: 1, border: "none", cursor: "pointer", borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 800,
+                background: stratStatus === s ? T.card : "transparent", color: stratStatus === s ? T.ink : T.sub,
+              }}>{s} ({catCount(stratCat, s === "Cerradas")})</button>
+            ))}
           </div>
-        )}
-      </div>
+
+          {stratItems.length === 0 && (
+            <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "8px 0" }}>No hay posiciones {stratStatus.toLowerCase()} en "{stratCat}".</div>
+          )}
+
+          {stratItems.map((p) => {
+            const blk = BLOCKS.find((b) => b.id === p.block);
+            const isOpt = isOptionNat(p);
+            const primaSum = primaSumOf(p);
+            const result = isOpt ? primaSum : mtmSumOf(p);
+            const riesgo = capDesplegado(p);
+            const rom = isOpt && riesgo ? primaSum / riesgo : NaN;
+            const dte = isOpt ? daysBetween(p.entryDate, p.expiry) : NaN;
+            const dit = daysBetween(p.entryDate, p.closed ? p.closeDate : todayIso);
+            /* ROI de acciones cerradas: P&L realizado / capital invertido (BEP × qty). Anualizado con el DIT real. */
+            const stockBasis = Math.abs(n(effBep(p)) * n(p.qty));
+            const stockRoi = !isOpt && p.closed && stockBasis ? result / stockBasis : NaN;
+            const stockAnnRoi = isFinite(stockRoi) && isFinite(dit) && dit > 0 ? stockRoi * (365 / dit) : NaN;
+            const fmtPct2 = (v) => (isFinite(v) ? (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%" : "\u2014");
+            const contratos = n(p.qty) / 100;
+            const qtyLabel = isOpt ? (Number.isInteger(contratos) ? contratos + " contr." : n(p.qty) + " opc") : n(p.qty) + " acc";
+            const chain = p.rollChain || [];
+            const open = expanded.has("strat-" + p.id);
+            return (
+              <div key={p.id} onClick={() => toggleExpand("strat-" + p.id)} style={{ borderTop: `1px solid ${T.line}`, padding: "10px 0", cursor: "pointer" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 14.5, fontWeight: 800, color: T.ink }}>{p.tkr || "—"}</span>
+                      {p.tipo && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.sub, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>{p.tipo}</span>}
+                      {isOpt && optionDetail(p) && <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub }}>{optionDetail(p)}</span>}
+                      {blk && <span style={{ fontSize: 9.5, fontWeight: 800, color: blk.color, background: blk.bg, borderRadius: 6, padding: "2px 5px" }}>{blk.name.replace("Bloque ", "B")}</span>}
+                      {chain.length > 0 && <span style={{ fontSize: 9.5, fontWeight: 800, color: T.purple, background: T.tile, borderRadius: 6, padding: "2px 5px" }}>🔄 ×{chain.length}</span>}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 600, marginTop: 3 }}>× {qtyLabel} · {ibkrDate(p.entryDate)}{p.closed ? " → " + ibkrDate(p.closeDate) : " · abierta"}</div>
+                  </div>
+                  <div style={{ textAlign: "right", flexShrink: 0 }}>
+                    <div style={{ fontSize: 14.5, fontWeight: 800, color: result >= 0 ? T.green : T.red }}>{signMoney(result)}</div>
+                    {p.closed && !!reopenPos && <button type="button" onClick={(ev) => { ev.stopPropagation(); reopenPos(p.id); }} style={{ marginTop: 4, background: "transparent", border: "none", fontSize: 11, fontWeight: 700, color: T.purple, cursor: "pointer", padding: 0 }}>Reabrir</button>}
+                  </div>
+                </div>
+                {open && (
+                  <div onClick={(ev) => ev.stopPropagation()} style={{ marginTop: 8, background: T.tile, borderRadius: 16, padding: "12px 12px" }}>
+                    {isOpt ? (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: T.ink, letterSpacing: -0.4 }}>{signMoney(primaSum)}</div>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>Prima acumulada</div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: isFinite(rom) && rom >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{fmtPct2(rom)}</div>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>ROM (prima/riesgo)</div>
+                          </div>
+                        </div>
+                        <div style={{ background: T.card, borderRadius: 14, padding: "10px 12px", display: "flex", justifyContent: "space-around", gap: 10, marginBottom: 10 }}>
+                          <div style={{ textAlign: "center" }}>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>Riesgo</div>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money(riesgo)}</div>
+                          </div>
+                          <div style={{ textAlign: "center" }}>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>BEP</div>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money2(effBep(p))}</div>
+                          </div>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: (chain.length > 0 || p.closed) ? 10 : 0 }}>
+                          <Tile label="DTE" value={isFinite(dte) ? dte + "d" : "—"} />
+                          <Tile label="DIT" value={isFinite(dit) ? dit + "d" : "—"} />
+                          <Tile label="IVR apertura" value={p.ivr || "—"} />
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+                          <div>
+                            <div style={{ fontSize: 22, fontWeight: 800, color: (p.closed ? result : effPnl(p)) >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{signMoney(p.closed ? result : effPnl(p))}</div>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>{p.closed ? "P&L realizado" : "P&L unrealised"}</div>
+                          </div>
+                          {p.closed && (
+                            <div style={{ textAlign: "right" }}>
+                              <div style={{ fontSize: 22, fontWeight: 800, color: isFinite(stockAnnRoi) && stockAnnRoi >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{fmtPct2(stockAnnRoi)}</div>
+                              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>Annualized ROI</div>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ background: T.card, borderRadius: 14, padding: "10px 12px", display: "flex", justifyContent: "space-around", gap: 10, marginBottom: 10 }}>
+                          <div style={{ textAlign: "center" }}>
+                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>Precio compra (BEP)</div>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money2(effBep(p))}</div>
+                          </div>
+                          {p.closed && (
+                            <div style={{ textAlign: "center" }}>
+                              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>Precio venta</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money2(n(p.closePrice))}</div>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: p.closed ? "1fr 1fr" : "1fr", gap: 8 }}>
+                          {p.closed && <Tile label="ROI" value={fmtPct2(stockRoi)} tone={isFinite(stockRoi) ? (stockRoi >= 0 ? "green" : "red") : undefined} />}
+                          <Tile label="DIT" value={isFinite(dit) ? dit + "d" : "—"} />
+                        </div>
+                      </>
+                    )}
+                    {isOpt && (chain.length > 0 || p.closed) && (
+                      <div>
+                        <div style={{ fontSize: 10, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>{chain.length > 0 ? "Cadena de rolls" : "Patas de la operación"}</div>
+                        {(() => {
+                          const rightLabel = p.right === "C" ? "CALL" : "PUT";
+                          const shortSide = natOf(p) === "CRED"; // corta: apertura = VENTA, recompra = COMPRA
+                          const q = n(p.qty);
+                          /* filas de patas: tabla más grande, deslizable en horizontal (minWidth fuerza scroll en móvil) */
+                          const LegRow = ({ date, action, strike, expiry, perShare, amount, fee, ivr, ret, isBuy, isExp }) => {
+                            const legDays = daysBetween(date, expiry);
+                            return (
+                            <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+                              <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(date)}</span>
+                              <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{action} {rightLabel}</span>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{strikeStr(strike)}{p.right}</span>
+                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, whiteSpace: "nowrap" }}>{expiry ? shortDate(expiry) : "—"}</span>
+                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(legDays) ? legDays + "d" : "—"}</span>
+                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{ivr || "—"}</span>
+                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{fee ? "$" + money2(fee) : "—"}</span>
+                              <span style={{ fontSize: 12.5, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(perShare))}</span>
+                              <span style={{ fontSize: 13, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(amount))}</span>
+                              <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>
+                            </div>
+                          );};
+                          const rows = [];
+                          const openAmt = openingPrimaPerShare(p) * q;
+                          rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStrike(p)} expiry={openingExpiry(p)} perShare={openingPrimaPerShare(p)} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} ret={n(openingStrike(p)) ? openingPrimaPerShare(p) / n(openingStrike(p)) : NaN} isBuy={!shortSide} />);
+                          chain.forEach((r, idx) => {
+                            const buyAmt = n(r.buybackCost) * q, sellAmt = n(r.newCredit) * q;
+                            rows.push(<LegRow key={"b" + idx} date={r.date} action={shortSide ? "COMPRA" : "VENTA"} strike={r.prevStrike} expiry={r.prevExpiry} perShare={n(r.buybackCost)} amount={buyAmt} fee={n(r.comision)} isBuy={shortSide} />);
+                            rows.push(<LegRow key={"s" + idx} date={r.date} action={shortSide ? "VENTA" : "COMPRA"} strike={strikeAfterRoll(p, idx)} expiry={expiryAfterRoll(p, idx)} perShare={n(r.newCredit)} amount={sellAmt} ivr={r.ivr} ret={n(strikeAfterRoll(p, idx)) ? n(r.newCredit) / n(strikeAfterRoll(p, idx)) : NaN} isBuy={!shortSide} />);
+                            if (r.note) rows.push(<div key={"n" + idx} style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 6px 4px", lineHeight: 1.4 }}>💬 {r.note}</div>);
+                          });
+                          if (p.closed) {
+                            const closeAmt = n(p.closePrice) * q;
+                            const isExp = n(p.closePrice) === 0;
+                            rows.push(<LegRow key="close" date={p.closeDate} action={isExp ? "EXPIRA" : (shortSide ? "COMPRA" : "VENTA")} strike={p.strike} expiry={p.expiry} perShare={n(p.closePrice)} amount={closeAmt} fee={n(p.closeComision)} isBuy={shortSide && !isExp} isExp={isExp} />);
+                            if (p.closeNote) rows.push(<div key="cn" style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 4px 4px", lineHeight: 1.4 }}>💬 {p.closeNote}</div>);
+                          }
+                          return (
+                            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", margin: "0 -12px", padding: "0 12px" }}>
+                              <div style={{ minWidth: 732 }}>
+                                <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
+                                  {["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", "%Strike"].map((h, i) => (
+                                    <span key={h} style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: i >= 4 ? "right" : "left" }}>{h}</span>
+                                  ))}
+                                </div>
+                                {rows}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </>
   );
 }
+
+
 
 
 /* ---------- COMPARADOR: fila EL con base ghost + delta ---------- */
@@ -1956,8 +2261,8 @@ function ComparadorContent({ nlv, margin, el, brokerLabel, trades, setTrades, ba
                 <Tile label="Annualized return on margin" value={pct(c.annRom, 0)} tone="green" />
               </div>
 
-              <ElRow label="EL / NLV post" post={c.elNlv} base={base.elNlv} delta={c.dElNlv} color={HEX[toneNlv(c.elNlv)]} min={0} max={0.6} zones={Z_NLV} marks={M_NLV_FULL} />
-              <ElRow label="EL / MRGN post" post={c.elMrgn} base={base.elMrgn} delta={c.dElMrgn} color={HEX[toneMrgn(c.elMrgn)]} min={0} max={1.5} zones={Z_MRGN} marks={M_MRGN_FULL} />
+              <ElRow label="EL / NLV post" post={c.elNlv} base={base.elNlv} delta={c.dElNlv} color={HEX[toneNlv(c.elNlv)]} min={0} max={0.6} zones={Z_NLV()} marks={M_NLV_FULL} />
+              <ElRow label="EL / MRGN post" post={c.elMrgn} base={base.elMrgn} delta={c.dElMrgn} color={HEX[toneMrgn(c.elMrgn)]} min={0} max={1.5} zones={Z_MRGN()} marks={M_MRGN_FULL} />
 
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, paddingTop: 13, borderTop: `1px solid ${T.line}` }}>
                 <button onClick={() => toggleEdit(c.id)} style={{ background: editing ? T.dark : T.tile, border: "none", borderRadius: 12, padding: "8px 16px", fontSize: 13.5, fontWeight: 700, color: editing ? "#fff" : T.ink, cursor: "pointer" }}>{editing ? "✓ Hecho" : "✎ Editar"}</button>
@@ -1990,7 +2295,7 @@ function App() {
   applyTheme(isDark);
   useEffect(() => {
     try {
-      const tc = document.getElementById("theme-color-meta"); if (tc) tc.setAttribute("content", isDark ? "#17140F" : "#EEE9E0");
+      const tc = document.getElementById("theme-color-meta"); if (tc) tc.setAttribute("content", isDark ? "#0A0A0A" : "#EEE9E0");
       const cs = document.getElementById("color-scheme-meta"); if (cs) cs.setAttribute("content", isDark ? "dark" : "light");
     } catch (e) {}
   }, [isDark]);
@@ -2033,7 +2338,7 @@ function App() {
   const [brokerModalOpen, setBrokerModalOpen] = useState(false);
   const [newBrokerName, setNewBrokerName] = useState("");
   const [removeTarget, setRemoveTarget] = useState({});
-  const [view, setView] = useState(() => { try { const v = localStorage.getItem(KEY_VIEW); return v === "comparador" || v === "movimientos" ? v : "bloques"; } catch (e) { return "bloques"; } });
+  const [view, setView] = useState(() => { try { const v = localStorage.getItem(KEY_VIEW); return v === "comparador" || v === "movimientos" || v === "ajustes" ? v : "bloques"; } catch (e) { return "bloques"; } });
   const selectView = (v) => { setView(v); try { localStorage.setItem(KEY_VIEW, v); } catch (e) {} };
   const [trades, setTrades] = useState([]);
   const [basis, setBasis] = useState(() => { try { const v = localStorage.getItem(KEY_BASIS); return BASIS_KEYS.includes(v) ? v : "annRom"; } catch (e) { return "annRom"; } });
@@ -2340,7 +2645,7 @@ function App() {
     const b = broker === "Todos" ? (brokers[0] || "IBKR") : broker;
     const defNat = blockId === 2 ? "CRED" : blockId === 3 ? "DEF" : "ACC";
     const today = new Date().toISOString().slice(0, 10);
-    setPositions((ps) => [...ps, { id, block: blockId, broker: b, tkr: "", tipo: "", nat: defNat, strike: "", right: "P", expiry: "", qty: "", bep: "", prima: "", comision: "", last: "", mktValue: "", riesgo: "", factor: "1", margen: "", margenPct: "100", margenModo: "PCT", mktModo: "AUTO", pnlModo: "AUTO", pnl: "", entryDate: today, rollChain: [], closed: false, closeDate: "", closePrice: "", closeComision: "" }]);
+    setPositions((ps) => [...ps, { id, block: blockId, broker: b, tkr: "", tipo: "", nat: defNat, strike: "", right: "P", expiry: "", qty: "", bep: "", prima: "", comision: "", ivr: "", last: "", mktValue: "", riesgo: "", factor: "1", margen: "", margenPct: "100", margenModo: "PCT", mktModo: "AUTO", pnlModo: "AUTO", pnl: "", entryDate: today, rollChain: [], closed: false, closeDate: "", closePrice: "", closeComision: "", closeNote: "" }]);
     setEditSet((s) => new Set(s).add(id));
   };
   const delPos = (id) => setPositions((ps) => ps.filter((p) => p.id !== id));
@@ -2349,20 +2654,42 @@ function App() {
      (crédito nuevo − recompra − comisión) se acumula sobre la prima total (BEP sigue funcionando igual) y
      además queda archivado en rollChain con su fecha: en Movimientos → Primas aparecen las dos patas (recompra
      y nueva entrada) como cash de prima, y en Movimientos → MTM aparece el neto de ESE roll como resultado
-     realizado (negativo si se pagó más al recomprar de lo que se cobró en la nueva entrada). */
-  const rollPos = (id, { date, strike, expiry, buybackCost, newCredit, comision }) => {
-    setPositions((ps) => ps.map((p) => {
-      if (p.id !== id) return p;
-      const netDelta = n(newCredit) - n(buybackCost) - n(comision);
-      const prevLeg = { date: date || new Date().toISOString().slice(0, 10), prevStrike: p.strike, prevExpiry: p.expiry, prevPrima: p.prima, buybackCost: n(buybackCost), newCredit: n(newCredit), comision: n(comision) };
-      return { ...p, rollChain: [...(p.rollChain || []), prevLeg], strike, expiry, prima: String(n(p.prima) + netDelta) };
-    }));
+     realizado (negativo si se pagó más al recomprar de lo que se cobró en la nueva entrada).
+     Covered calls (nat=Crédito, right=C): además de rolar la propia opción, el neto en $ del roll (por acción
+     × cantidad de contratos) se reparte como rebaja de BEP sobre la(s) posición(es) de Acción (nat=ACC, mismo
+     broker + ticker) — igual que en la contabilidad real, la prima de la covered call reduce el coste base de
+     las acciones subyacentes. Si el neto es negativo (se pagó más al recomprar que lo cobrado en la nueva venta)
+     el BEP de la acción sube en vez de bajar. */
+  const rollPos = (id, { date, strike, expiry, buybackCost, newCredit, comision, ivr, note }) => {
+    setPositions((ps) => {
+      const target = ps.find((p) => p.id === id);
+      const netPerShare = n(newCredit) - n(buybackCost);
+      const isCoveredCall = !!target && natOf(target) === "CRED" && target.right === "C";
+      const totalCash = isCoveredCall ? netPerShare * n(target.qty) : 0;
+      const tkrKey = target ? (target.tkr || "").trim().toUpperCase() : "";
+      const stockMatches = isCoveredCall && totalCash
+        ? ps.filter((p) => p.id !== id && natOf(p) === "ACC" && !p.closed && p.broker === target.broker && (p.tkr || "").trim().toUpperCase() === tkrKey)
+        : [];
+      const stockQtyTotal = stockMatches.reduce((s, p) => s + n(p.qty), 0);
+      const perShareAdj = stockQtyTotal ? totalCash / stockQtyTotal : 0;
+      const stockIds = new Set(stockMatches.map((p) => p.id));
+      return ps.map((p) => {
+        if (p.id === id) {
+          const prevLeg = { date: date || new Date().toISOString().slice(0, 10), prevStrike: p.strike, prevExpiry: p.expiry, prevPrima: p.prima, buybackCost: n(buybackCost), newCredit: n(newCredit), comision: n(comision), ivr: ivr || "", note: note || "" };
+          return { ...p, rollChain: [...(p.rollChain || []), prevLeg], strike, expiry, prima: String(n(p.prima) + netPerShare) };
+        }
+        if (perShareAdj && stockIds.has(p.id)) {
+          return { ...p, bep: String(n(p.bep) - perShareAdj) };
+        }
+        return p;
+      });
+    });
   };
   /* cierre de posición: acciones (o ETF/collar) solo necesitan precio de venta → resultado realizado va a MTM;
      opciones necesitan precio de recompra → cash de prima va a Primas. En ambos casos la posición se marca
      "closed" pero NO se borra (así conserva su historial para Movimientos) y deja de contar en riesgo/exposición. */
-  const closePos = (id, { date, price, comision }) => {
-    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision } : p)));
+  const closePos = (id, { date, price, comision, note }) => {
+    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision, closeNote: note || "" } : p)));
   };
   const reopenPos = (id) => setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: false } : p)));
   const clearAll = () => {
@@ -2381,7 +2708,7 @@ function App() {
 
   const isBlockTab = typeof activeTab === "number";
   const blk = isBlockTab ? BLOCKS.find((b) => b.id === activeTab) : null;
-  const blockPositions = isBlockTab ? filtered.filter((p) => p.block === activeTab) : [];
+  const blockPositions = isBlockTab ? active.filter((p) => p.block === activeTab) : [];
 
   const blockTotals = useMemo(() => {
     const t = {};
@@ -2646,17 +2973,11 @@ function App() {
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 8 }}>
           <div>
-            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : view === "movimientos" ? "Movimientos" : "Comparador"}</div>
-            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : view === "movimientos" ? "Primas y resultado realizado (MTM)" : "Sizing e impacto de margen"}</div>
+            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : view === "movimientos" ? "Movimientos" : view === "ajustes" ? "Ajustes" : "Comparador"}</div>
+            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : view === "movimientos" ? "Primas y resultado realizado (MTM)" : view === "ajustes" ? "Brokers, backup, claves y apariencia" : "Sizing e impacto de margen"}</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            <button onClick={toggleDark} aria-label="Modo oscuro/claro" style={{ background: T.card, border: "none", borderRadius: 14, width: 36, height: 36, fontSize: 15, cursor: "pointer", boxShadow: T.shadow, display: "flex", alignItems: "center", justifyContent: "center" }}>{isDark ? "☀️" : "🌙"}</button>
             {view === "bloques" && <button onClick={onRefreshClick} disabled={refreshing} style={{ background: T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>{refreshing ? "…" : "🔄 Precios"}</button>}
-            {view === "bloques" && <button onClick={openExport} style={{ background: T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>Exportar</button>}
-            {view === "bloques" && <button onClick={openBackup} style={{ background: T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>Backup</button>}
-            {view === "comparador" && <button onClick={openGeminiModal} style={{ background: geminiKey ? T.card : T.tileAmber, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>{geminiKey ? "🔑 Lector" : "🔑 Activar Lector"}</button>}
-            {view === "bloques" && <button onClick={clearAll} style={{ background: confirmClear ? T.red : T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: confirmClear ? "#fff" : T.sub, cursor: "pointer", boxShadow: T.shadow }}>{confirmClear ? "¿Vaciar?" : "Limpiar"}</button>}
-            {view === "comparador" && trades.length > 0 && <button onClick={clearTrades} style={{ background: confirmClearTr ? T.red : T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: confirmClearTr ? "#fff" : T.sub, cursor: "pointer", boxShadow: T.shadow }}>{confirmClearTr ? "¿Vaciar?" : "Limpiar"}</button>}
           </div>
         </div>
 
@@ -2673,7 +2994,7 @@ function App() {
         {refreshMsg && <div style={{ fontSize: 12, color: T.green, fontWeight: 700, marginBottom: 12, background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>{refreshMsg}</div>}
 
         {/* SELECTOR BROKER */}
-        {view !== "movimientos" && (
+        {view !== "movimientos" && view !== "ajustes" && (
         <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "stretch" }}>
           <div style={{ background: T.dark, borderRadius: 18, padding: 6, display: "flex", gap: 6, flex: 1, overflowX: "auto" }}>
             {(brokers.length > 1 ? ["Todos", ...brokers] : brokers).map((b) => (
@@ -2683,12 +3004,11 @@ function App() {
               }}>{b}</button>
             ))}
           </div>
-          {view === "bloques" && <button onClick={() => { setBrokerModalOpen(true); setNewBrokerName(""); setRemoveTarget({}); }} aria-label="Gestionar brokers" style={{ flexShrink: 0, background: T.card, border: "none", borderRadius: 16, padding: "0 14px", fontSize: 18, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>⚙</button>}
         </div>
         )}
 
         {/* CUENTA */}
-        {view !== "movimientos" && (
+        {view !== "movimientos" && view !== "ajustes" && (
         <div style={{ background: T.card, borderRadius: 24, padding: 16, marginBottom: 16, boxShadow: T.shadow }}>
           <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>
             Cuenta · {broker === "Todos" ? "consolidado" : broker}
@@ -2728,7 +3048,7 @@ function App() {
                 <span style={{ fontSize: 13, color: T.ink, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 5 }}>EL / NLV <InfoDot onClick={() => setInfo("nlv")} /></span>
                 <span style={{ fontSize: 17, fontWeight: 800, color: HEX[toneNlv(elNlv)] }}>{pct(elNlv)}</span>
               </div>
-              <ZoneBar value={elNlv} min={0} max={0.6} zones={Z_NLV} />
+              <ZoneBar value={elNlv} min={0} max={0.6} zones={Z_NLV()} />
               <Scale min={0} max={0.6} marks={M_NLV_MINI} />
             </div>
             <div>
@@ -2736,7 +3056,7 @@ function App() {
                 <span style={{ fontSize: 13, color: T.ink, fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 5 }}>EL / MRGN <InfoDot onClick={() => setInfo("mrgn")} /></span>
                 <span style={{ fontSize: 17, fontWeight: 800, color: HEX[toneMrgn(elMrgn)] }}>{pct(elMrgn)}</span>
               </div>
-              <ZoneBar value={elMrgn} min={0} max={1.5} zones={Z_MRGN} />
+              <ZoneBar value={elMrgn} min={0} max={1.5} zones={Z_MRGN()} />
               <Scale min={0} max={1.5} marks={M_MRGN_MINI} />
             </div>
           </div>
@@ -2799,7 +3119,49 @@ function App() {
 
         </>)}
 
-        {view === "movimientos" && <MovimientosView positions={filtered} />}
+        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} />}
+
+        {view === "ajustes" && (
+          <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>Apariencia</div>
+              <button onClick={toggleDark} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: T.tile, border: "none", borderRadius: 14, padding: "13px 16px", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>
+                <span>{isDark ? "Modo oscuro" : "Modo claro"}</span>
+                <span style={{ fontSize: 20 }}>{isDark ? "🌙" : "☀️"}</span>
+              </button>
+            </div>
+
+            <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>Brokers</div>
+              <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, lineHeight: 1.4, marginBottom: 10 }}>{brokers.join(" · ")}</div>
+              <button onClick={() => { setBrokerModalOpen(true); setNewBrokerName(""); setRemoveTarget({}); }} style={{ width: "100%", background: T.tile, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>⚙ Gestionar brokers (añadir / quitar)</button>
+            </div>
+
+            <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>Datos</div>
+              <div style={{ display: "grid", gap: 10 }}>
+                <button onClick={openExport} style={{ width: "100%", background: T.tile, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>Exportar cartera</button>
+                <button onClick={openBackup} style={{ width: "100%", background: T.tile, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>Backup (copiar / restaurar)</button>
+                <button onClick={clearAll} style={{ width: "100%", background: confirmClear ? T.red : T.tileRed, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: confirmClear ? "#fff" : T.red, cursor: "pointer" }}>{confirmClear ? "¿Seguro? Vacía toda la cartera" : "Limpiar cartera (Portfolio)"}</button>
+                {trades.length > 0 && <button onClick={clearTrades} style={{ width: "100%", background: confirmClearTr ? T.red : T.tileRed, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: confirmClearTr ? "#fff" : T.red, cursor: "pointer" }}>{confirmClearTr ? "¿Seguro? Vacía el Comparador" : "Limpiar operaciones del Comparador"}</button>}
+              </div>
+            </div>
+
+            <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>API keys</div>
+              <div style={{ display: "grid", gap: 10 }}>
+                <button onClick={openChangeKey} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: apiKey ? T.tile : T.tileAmber, border: "none", borderRadius: 14, padding: "13px 16px", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>
+                  <span>Precios (Finnhub)</span>
+                  <span style={{ fontSize: 12, color: T.sub, fontWeight: 700 }}>{apiKey ? "🔑 cambiar" : "🔑 activar"}</span>
+                </button>
+                <button onClick={openGeminiModal} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: geminiKey ? T.tile : T.tileAmber, border: "none", borderRadius: 14, padding: "13px 16px", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>
+                  <span>Lector de capturas (Gemini, Comparador)</span>
+                  <span style={{ fontSize: 12, color: T.sub, fontWeight: 700 }}>{geminiKey ? "🔑 cambiar" : "🔑 activar"}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <div style={{ textAlign: "center", fontSize: 14, fontWeight: 800, color: T.sub, letterSpacing: 0.3, margin: "22px 0 4px" }}>💸Galo Will Make You Rich💸</div>
         <div style={{ textAlign: "center", fontSize: 11, fontWeight: 700, color: T.sub, opacity: 0.7, marginBottom: 4 }}>
@@ -2965,7 +3327,7 @@ function App() {
       {/* NAV INFERIOR FLOTANTE */}
       <div style={{ position: "fixed", left: 0, right: 0, bottom: 18, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
         <div style={{ display: "flex", gap: 4, background: "rgba(28,25,20,0.92)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", borderRadius: 30, padding: "8px 8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)", pointerEvents: "auto" }}>
-          {[["bloques", "📊", "Portfolio"], ["movimientos", "🔁", "Movimientos"], ["comparador", "⚖️", "Comparador"]].map(([id, icon, label]) => (
+          {[["bloques", "📊", "Portfolio"], ["movimientos", "🔁", "Movimientos"], ["comparador", "⚖️", "Comparador"], ["ajustes", "⚙️", "Ajustes"]].map(([id, icon, label]) => (
             <button key={id} onClick={() => selectView(id)} style={{
               display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
               background: view === id ? "rgba(255,255,255,0.14)" : "transparent", borderRadius: 22, padding: "8px 16px", minWidth: 76,
