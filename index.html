@@ -120,7 +120,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.06";
+const APP_VERSION = "5.07";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -3853,13 +3853,15 @@ function App() {
         *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
         @keyframes pullSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
-      {/* indicador global de descarga de precios (v5.06): píldora fija arriba, visible en cualquier
-         pestaña mientras refreshing — cubre la descarga automática del arranque, el pull y el botón. */}
+      {/* indicador global de descarga de precios (v5.07): píldora pequeña fija en la esquina superior
+         derecha — antes iba centrada y tapaba el título "Portfolio". Ahora vive en el hueco vacío a la
+         derecha del título, más pequeña y translúcida. Visible en cualquier pestaña mientras refreshing —
+         cubre la descarga automática del arranque, el pull y el botón. */}
       {refreshing && (
-        <div style={{ position: "fixed", top: "calc(10px + env(safe-area-inset-top))", left: 0, right: 0, display: "flex", justifyContent: "center", zIndex: 60, pointerEvents: "none" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(28,26,32,0.72)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", borderRadius: 22, padding: "8px 14px", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", border: "0.5px solid rgba(255,255,255,0.08)" }}>
-            <span style={{ fontSize: 14, display: "inline-block", animation: "pullSpin 0.8s linear infinite" }}>🔄</span>
-            <span style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Actualizando precios…</span>
+        <div style={{ position: "fixed", top: "calc(20px + env(safe-area-inset-top))", right: 14, zIndex: 60, pointerEvents: "none" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(28,26,32,0.55)", backdropFilter: "blur(18px) saturate(160%)", WebkitBackdropFilter: "blur(18px) saturate(160%)", borderRadius: 16, padding: "5px 10px", boxShadow: "0 6px 18px rgba(0,0,0,0.22)", border: "0.5px solid rgba(255,255,255,0.08)" }}>
+            <span style={{ fontSize: 11, display: "inline-block", animation: "pullSpin 0.8s linear infinite" }}>🔄</span>
+            <span style={{ fontSize: 10.5, fontWeight: 700, color: "#fff" }}>Actualizando…</span>
           </div>
         </div>
       )}
