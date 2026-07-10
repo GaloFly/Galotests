@@ -120,7 +120,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.05";
+const APP_VERSION = "5.06";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -3169,6 +3169,7 @@ function App() {
   useEffect(() => {
     if (pendingAutoRefresh && apiKey && !refreshing) {
       setPendingAutoRefresh(false);
+      setRefreshChoiceOpen(false); /* seguridad: si algo dejó la hoja abierta, se cierra al lanzar la descarga */
       runRefresh(apiKey);
     }
   }, [pendingAutoRefresh, apiKey]);
@@ -3852,10 +3853,20 @@ function App() {
         *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
         @keyframes pullSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
-      {view === "bloques" && (pullDist > 0 || refreshing) && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: refreshing ? 40 : pullDist, overflow: "hidden", transition: refreshing ? "height 0.15s" : "none", marginBottom: (pullDist > 0 || refreshing) ? 4 : 0 }}>
-          <span style={{ fontSize: 20, display: "inline-block", animation: (refreshing || pullDist >= PULL_THRESHOLD) ? "pullSpin 0.8s linear infinite" : "none", opacity: Math.min((refreshing ? 1 : pullDist / PULL_THRESHOLD), 1) }}>🔄</span>
-          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, marginLeft: 8 }}>{refreshing ? "Actualizando precios…" : pullDist >= PULL_THRESHOLD ? "Suelta para actualizar" : "Tira para actualizar precios"}</span>
+      {/* indicador global de descarga de precios (v5.06): píldora fija arriba, visible en cualquier
+         pestaña mientras refreshing — cubre la descarga automática del arranque, el pull y el botón. */}
+      {refreshing && (
+        <div style={{ position: "fixed", top: "calc(10px + env(safe-area-inset-top))", left: 0, right: 0, display: "flex", justifyContent: "center", zIndex: 60, pointerEvents: "none" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, background: "rgba(28,26,32,0.72)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", borderRadius: 22, padding: "8px 14px", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", border: "0.5px solid rgba(255,255,255,0.08)" }}>
+            <span style={{ fontSize: 14, display: "inline-block", animation: "pullSpin 0.8s linear infinite" }}>🔄</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "#fff" }}>Actualizando precios…</span>
+          </div>
+        </div>
+      )}
+      {view === "bloques" && pullDist > 0 && !refreshing && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: pullDist, overflow: "hidden", marginBottom: 4 }}>
+          <span style={{ fontSize: 20, display: "inline-block", animation: pullDist >= PULL_THRESHOLD ? "pullSpin 0.8s linear infinite" : "none", opacity: Math.min(pullDist / PULL_THRESHOLD, 1) }}>🔄</span>
+          <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, marginLeft: 8 }}>{pullDist >= PULL_THRESHOLD ? "Suelta para actualizar" : "Tira para actualizar precios"}</span>
         </div>
       )}
       <div style={{ maxWidth: 720, margin: "0 auto" }}>
