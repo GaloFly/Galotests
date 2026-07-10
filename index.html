@@ -54,6 +54,15 @@ function hexToRgba(hex, a) {
   const r = parseInt(h.substring(0, 2), 16), g = parseInt(h.substring(2, 4), 16), b = parseInt(h.substring(4, 6), 16);
   return `rgba(${r},${g},${b},${a})`;
 }
+/* mezcla dos colores hex; t=0 -> hexA puro, t=1 -> hexB puro. Se usa para tonos derivados (p.ej. el morado del FAB
+   atenuado hacia el gris oscuro de la barra inferior, sin depender de un color fijo ajeno al tema). */
+function mixHex(hexA, hexB, t) {
+  const pa = hexA.replace("#", ""), pb = hexB.replace("#", "");
+  const ra = parseInt(pa.substring(0, 2), 16), ga = parseInt(pa.substring(2, 4), 16), ba = parseInt(pa.substring(4, 6), 16);
+  const rb = parseInt(pb.substring(0, 2), 16), gb = parseInt(pb.substring(2, 4), 16), bb = parseInt(pb.substring(4, 6), 16);
+  const r = Math.round(ra + (rb - ra) * t), g = Math.round(ga + (gb - ga) * t), b = Math.round(ba + (bb - ba) * t);
+  return `rgb(${r},${g},${b})`;
+}
 function applyTheme(dark) {
   DARK = dark;
   T = dark ? T_DARK : T_LIGHT;
@@ -69,7 +78,7 @@ function applyTheme(dark) {
     { id: 3, name: "Bloque 3", tag: "High Risk", desc: "Earnings · 0DTE · spreads", color: T.orange, bg: T.tileAmber, badge: T.orange,
       tMin: 0.00, tMax: 0.05, scaleMin: 0, scaleMax: 0.15, band: 0.03 },
   ];
-  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "vencimientos", label: "📅 Vencimientos", color: T.orange }, { id: "rendimiento", label: "📈 Rendimiento", color: T.gold }, { id: "aportaciones", label: "💶 Aportaciones", color: T.green }];
+  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "rendimiento", label: "Rendimiento", color: T.gold }, { id: "aportaciones", label: "Aportaciones", color: T.green }];
 }
 applyTheme(false);
 const RULES = { elNlv: { green: 0.4, amber: 0.25 }, elMrgn: { green: 1.0, amber: 0.5 } };
@@ -112,7 +121,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.28";
+const APP_VERSION = "4.69";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -165,21 +174,21 @@ const NATS = [
   { id: "CASH", label: "Cash" },
 ];
 const natsForBlock = (block) => {
-  if (block === 0) return NATS.filter((x) => x.id === "ACC" || x.id === "CASH");
-  if (block === 1) return NATS.filter((x) => x.id !== "CASH");
+  if (block === 0) return [{ id: "ACC", label: "ETF" }, { id: "CASH", label: "Cash" }]; /* B0: liquidez — ETF (treasury/money market) o cash */
+  if (block === 1) return NATS.filter((x) => x.id !== "CASH" && x.id !== "DEF"); /* B1: sin estrategias de débito */
   return NATS.filter((x) => x.id !== "COLLAR" && x.id !== "CASH");
 };
 /* estrategias por bloque (desplegable de la etiqueta p.tipo) */
 const STRATS = {
   0: ["Treasury ETF", "Money Market", "Cash"],
-  1: ["Long Stock", "Short Put", "Short Call", "Collar"],
-  2: ["Short Put", "Short Call", "Diagonal", "DD", "Calendar", "DC", "Iron Condor", "PMCC", "Call Broken Wing", "Put Broken Wing", "Long Call Leaps"],
+  1: ["Long Stock", "Short Put", "Covered Call", "Collar"],
+  2: ["Long Stock", "Short Put", "Covered Call", "Diagonal", "DD", "Calendar", "DC", "Iron Condor", "PMCC", "Call Broken Wing", "Put Broken Wing", "Long Call"],
   3: ["Calendar", "DC", "Diagonal", "DD", "Iron Man", "Iron Fly", "Iron Condor"],
 };
 const natFromStrat = (strat) => {
   const t = (strat || "").toLowerCase();
   if (t === "long stock") return "ACC";
-  if (t === "short put" || t === "short call") return "CRED";
+  if (t === "short put" || t === "short call" || t === "covered call") return "CRED";
   if (t === "collar") return "COLLAR";
   if (t === "cash") return "CASH";
   if (t.includes("etf") || t.includes("money")) return "ACC";
@@ -199,26 +208,45 @@ const isOptionNat = (p) => { const x = natOf(p); return x !== "ACC" && x !== "CA
 const contractsOf = (p) => n(p.qty) / 100;
 /* BEP automático por prima: cualquier posición de Tipo "Crédito" (short put, covered call, hybrid collar) cobra prima → BEP = Strike − Prima.
    Se basa en "nat" (Tipo), no en el texto de Estrategia, para que funcione siempre que el Tipo sea Crédito, se haya elegido la estrategia como se haya elegido.
-   "Long Call Leaps" es la única estrategia de débito con esta fórmula simple (Strike + Prima); el resto de nat=Débito son multi-pata y llevan BEP manual. */
-const BEP_DEBIT_STRATS = new Set(["Long Call Leaps"]);
+   "Long Call" es la única estrategia de débito con esta fórmula simple (Strike + Prima); el resto de nat=Débito son multi-pata y llevan BEP manual.
+   Se conserva "Long Call Leaps" (nombre anterior) para no romper el BEP de posiciones ya guardadas con ese tipo. */
+const BEP_DEBIT_STRATS = new Set(["Long Call", "Long Call Leaps"]);
 const bepAutoStrat = (p) => (natOf(p) === "CRED" ? "CREDIT" : BEP_DEBIT_STRATS.has(p.tipo) ? "DEBIT" : null);
+/* PMCC (diagonal débito): la pata CORTA es la posición principal (nat=Crédito, right=C) y se rola/registra
+   exactamente como cualquier short call — sus rolls acumulan crédito en p.prima. La pata LARGA (call comprada)
+   se guarda en p.long = { strike, expiry, prima }. El "BEP" del PMCC no es un precio: es el DÉBITO NETO por
+   acción = prima pagada por la long − prima (acumulada) cobrada por la short. El riesgo = ese débito neto × qty
+   (mínimo 0: si se ha cobrado más de lo pagado, ya no hay riesgo). */
+const isPMCC = (p) => (p.tipo || "").toLowerCase() === "pmcc";
+const pmccNetDebit = (p) => n((p.long || {}).prima) - n(p.prima); // por acción; baja según acumula la short
+const pmccRisk = (p) => Math.max(0, pmccNetDebit(p)) * n(p.qty);
 const effBep = (p) => {
+  if (isPMCC(p)) return pmccNetDebit(p);
   const s = bepAutoStrat(p);
   if (s === "CREDIT") return n(p.strike) - n(p.prima);
   if (s === "DEBIT") return n(p.strike) + n(p.prima);
   return n(p.bep);
 };
+/* Long Call (débito de una pata): su riesgo es SIEMPRE el 100% de la prima pagada = prima × qty.
+   No se ancla al BEP×qty como el resto de débito, y no lleva factor de plausible. */
+const isLongCallPos = (p) => natOf(p) === "DEF" && BEP_DEBIT_STRATS.has(p.tipo);
+const longCallCost = (p) => Math.abs(n(p.prima) * n(p.qty));
 /* capital desplegado — numerador del barbell (/ NLV → 80/15/5) */
 const capDesplegado = (p) => {
   const nat = natOf(p);
   if (nat === "CASH") return Math.abs(n(p.mktValue));
-  if (nat === "ACC" || nat === "COLLAR") return Math.abs(n(p.last) * n(p.qty));
-  if (nat === "CRED") return Math.abs(effBep(p) * n(p.qty));
+  if (nat === "ACC") return Math.abs(n(p.last) * n(p.qty));
+  if (nat === "COLLAR") return p.coveredBy ? 0 : Math.abs(n(p.last) * n(p.qty)); /* collar vinculado a una acción de B1: el tamaño ya lo cuenta la acción */
+  if (isPMCC(p)) return pmccRisk(p); // PMCC: débito neto × qty (mín 0)
+  if (nat === "CRED") return (p.right === "C" && p.covered) ? 0 : Math.abs(effBep(p) * n(p.qty)); /* covered call: las acciones ya cuentan su riesgo en su propio bloque */
+  if (isLongCallPos(p)) return longCallCost(p) || n(p.riesgo); // Long Call: prima pagada
   return n(p.riesgo) || Math.abs(effBep(p) * n(p.qty)); // DEF
 };
 /* riesgo total / techo — para acción y crédito coincide con capital desplegado */
 const riesgoTotalOf = (p) => {
   const nat = natOf(p);
+  if (isPMCC(p)) return pmccRisk(p); // PMCC: débito neto × qty (mín 0)
+  if (isLongCallPos(p)) return longCallCost(p) || n(p.riesgo); // Long Call: prima pagada
   if (nat === "COLLAR" || nat === "DEF") return n(p.riesgo) || (nat === "DEF" ? Math.abs(effBep(p) * n(p.qty)) : 0);
   return capDesplegado(p);
 };
@@ -226,8 +254,21 @@ const riesgoTotalOf = (p) => {
 const plausibleOf = (p) => {
   const nat = natOf(p);
   if (nat === "CASH") return 0;
-  if (nat === "COLLAR") return n(p.riesgo);
+  if (isPMCC(p)) return pmccRisk(p); // PMCC: plausible = riesgo (débito neto), sin factor
+  if (nat === "COLLAR") return p.coveredBy ? 0 : n(p.riesgo); /* collar vinculado: su riesgo se expresa en el plausible de la acción */
   if (nat === "DEF") return riesgoTotalOf(p);
+  /* acciones: el plausible se ancla al capital comprometido en la entrada (BEP × qty), no al valor de
+     mercado — así no es procíclico (no sube porque suba la acción) y cada prima de covered call cobrada,
+     al rebajar el BEP vía el ajuste wheel, reduce mecánicamente el riesgo plausible. Si no hay BEP
+     (posición incompleta), cae al valor de mercado como antes. */
+  if (nat === "ACC") {
+    /* plausBep: BEP alternativo fijado por un collar sobre esta acción. "0" = collar sin riesgo →
+       plausible 0 (sigue contando en tamaño/sizing vía capDesplegado). Un valor > 0 sustituye al BEP
+       como base del plausible. Vacío = sin collar, comportamiento normal. */
+    if (p.plausBep !== "" && p.plausBep != null) return Math.abs(n(p.plausBep) * n(p.qty)) * factorOf(p);
+    const base = n(effBep(p)) ? Math.abs(effBep(p) * n(p.qty)) : capDesplegado(p);
+    return base * factorOf(p);
+  }
   return capDesplegado(p) * factorOf(p);
 };
 /* valor de mercado — para acciones (ACC) se recalcula solo: Último × Cantidad. Manual para opciones o si se fuerza. */
@@ -236,9 +277,24 @@ const effMkt = (p) => (isAutoMkt(p) ? n(p.last) * n(p.qty) : n(p.mktValue));
 const isPctMargin = (p) => p.margenModo !== "VALOR";
 const effMargen = (p) => (natOf(p) === "CASH" ? 0 : (isPctMargin(p) ? Math.abs(effMkt(p)) * (p.margenPct === "" || p.margenPct == null ? 0 : n(p.margenPct)) / 100 : n(p.margen)));
 const isAutoPnl = (p) => p.pnlModo !== "MANUAL";
-const effPnl = (p) => (isAutoPnl(p) ? (n(p.last) - effBep(p)) * n(p.qty) : n(p.pnl));
+const effPnl = (p) => {
+  if (!isAutoPnl(p)) return n(p.pnl);
+  /* opción corta (CRED): P&L no realizado simulado a vencimiento sobre el spot.
+     Short put: Spot − BEP (= spot − strike + prima) con techo en la prima — sobre el strike se queda
+     toda la prima; bajo el BEP entra en pérdida. Short/covered call: prima − intrínseco de la call
+     (min(prima, strike + prima − spot)). Sin spot, P&L 0. */
+  if (natOf(p) === "CRED") {
+    const spot = n(p.last);
+    if (!spot) return 0;
+    const prima = n(p.prima), strike = n(p.strike);
+    const perShare = p.right === "C" ? Math.min(prima, strike + prima - spot) : Math.min(prima, spot - effBep(p));
+    return perShare * n(p.qty);
+  }
+  return (n(p.last) - effBep(p)) * n(p.qty);
+};
 const money = (v) => n(v).toLocaleString("en-US", { maximumFractionDigits: 0 });
 const money2 = (v) => n(v).toLocaleString("en-US", { maximumFractionDigits: 2 });
+const daysBetween = (d0, d1) => (!d0 || !d1) ? NaN : Math.round((new Date(d1 + "T00:00:00") - new Date(d0 + "T00:00:00")) / 86400000);
 const pct = (v, d = 1) => (isFinite(v) ? (v * 100).toFixed(d) + "%" : "—");
 const signMoney = (v) => (n(v) >= 0 ? "+$" + money(v) : "-$" + money(Math.abs(n(v))));
 const signPct = (v, d = 1) => (isFinite(v) ? (v >= 0 ? "+" : "") + pct(v, d) : "—");
@@ -460,6 +516,44 @@ function Scale({ min, max, marks }) {
     </div>
   );
 }
+function WizInput({ label, value, onChange, placeholder, type, inputMode, upper, signed }) {
+  /* type="date": en iOS el input de fecha tiene altura/anchura intrínsecas distintas al de texto y se salía del
+     encuadre de la rejilla — se fuerza appearance:none + altura fija 47px (la misma que los de texto) y minWidth 0.
+     signed: el teclado decimal de iOS no tiene tecla "−", así que se añade un botón +/− dentro del campo
+     (prima pagada en un roll caro, collar de débito, etc.). */
+  const isDate = type === "date";
+  const neg = signed && String(value || "").trim().startsWith("-");
+  const shown = signed ? String(value || "").replace("-", "") : (value || "");
+  return (
+    <label style={{ display: "block", minWidth: 0 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
+      <div style={{ position: "relative" }}>
+        <input type={type || "text"} inputMode={inputMode} value={shown} placeholder={placeholder || ""}
+          onChange={(e) => { let v = upper ? e.target.value.toUpperCase() : e.target.value; if (signed) v = (neg ? "-" : "") + v.replace(/-/g, ""); onChange(v); }}
+          style={{ width: "100%", boxSizing: "border-box", background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 12, padding: signed ? "11px 42px 11px 12px" : "11px 12px", fontSize: 15, fontWeight: 700, color: T.ink, outline: "none", fontVariantNumeric: "tabular-nums", colorScheme: DARK ? "dark" : "light",
+            ...(isDate ? { height: 47, minWidth: 0, display: "block", WebkitAppearance: "none", appearance: "none", textAlign: "left" } : { height: 47 }) }} />
+        {signed && (
+          <button type="button" onClick={() => onChange((neg ? "" : "-") + String(value || "").replace(/-/g, ""))}
+            style={{ position: "absolute", right: 7, top: "50%", transform: "translateY(-50%)", width: 30, height: 30, borderRadius: 9, border: "none", background: neg ? T.red : T.line, color: neg ? "#fff" : T.sub, fontSize: 16, fontWeight: 800, cursor: "pointer", lineHeight: 1 }}>{neg ? "−" : "+"}</button>
+        )}
+      </div>
+    </label>
+  );
+}
+function WizSelect({ label, value, onChange, options }) {
+  return (
+    <label style={{ display: "block", minWidth: 0 }}>
+      <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</div>
+      <div style={{ position: "relative" }}>
+        <select value={value || ""} onChange={(e) => onChange(e.target.value)}
+          style={{ width: "100%", boxSizing: "border-box", height: 47, background: T.tile, border: "none", borderRadius: 12, padding: "0 32px 0 12px", fontSize: 15, fontWeight: 700, color: T.ink, outline: "none", appearance: "none", WebkitAppearance: "none", textOverflow: "ellipsis" }}>
+          {(options || []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+        <span style={{ position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)", color: T.sub, fontSize: 12, pointerEvents: "none" }}>▾</span>
+      </div>
+    </label>
+  );
+}
 function Tile({ label, value, tone }) {
   const map = {
     green: { bg: T.tileGreen, val: T.green }, amber: { bg: T.tileAmber, val: T.gold }, red: { bg: T.tileRed, val: T.red },
@@ -536,6 +630,17 @@ function EditField({ label, value, onChange, prefix, span, text, signed, type, s
     </label>
   );
 }
+/* cabecera de sección dentro del formulario de edición: agrupa los campos en bloques visuales
+   (Posición / Contrato / Precios / Riesgo / Acciones) para que el formulario largo sea navegable */
+function EditSection({ icon, title, first }) {
+  return (
+    <div style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 7, marginTop: first ? 0 : 10 }}>
+      <span style={{ fontSize: 12 }}>{icon}</span>
+      <span style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.6, whiteSpace: "nowrap" }}>{title}</span>
+      <div style={{ flex: 1, height: 1, background: T.line }} />
+    </div>
+  );
+}
 function Pill({ options, value, onChange, size }) {
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -552,11 +657,14 @@ function SelectField({ label, value, options, onChange, span }) {
   return (
     <label style={{ display: "block", gridColumn: span ? "span " + span : "auto" }}>
       {label && <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>{label}</span>}
-      <select value={value || ""} onChange={(e) => onChange(e.target.value)}
-        style={{ width: "100%", boxSizing: "border-box", background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 11, color: T.ink, fontSize: 14.5, fontWeight: 700, padding: "9px 10px", outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-        {!options.includes(value) && value ? <option value={value}>{value}</option> : null}
-        {options.map((o) => <option key={o} value={o}>{o}</option>)}
-      </select>
+      <div style={{ position: "relative" }}>
+        <select value={value || ""} onChange={(e) => onChange(e.target.value)}
+          style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 11, color: T.ink, fontSize: 14.5, fontWeight: 700, padding: "0 28px 0 10px", outline: "none", appearance: "none", WebkitAppearance: "none", textOverflow: "ellipsis" }}>
+          {!options.includes(value) && value ? <option value={value}>{value}</option> : null}
+          {options.map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+        <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: T.sub, fontSize: 12, pointerEvents: "none" }}>▾</span>
+      </div>
     </label>
   );
 }
@@ -577,7 +685,7 @@ function InfoModal({ type, onClose }) {
     head: ["EL / Margin", "Lectura"], rows: [["≥ 1,0", "Cómodo"], ["0,6–1,0", "Normal / ajustado"], ["< 0,5", "No cruzar"]],
   } : type === "riesgo" ? {
     title: "Riesgo total vs plausible vs P&L",
-    body: "Riesgo total = lo que va al barbell (80/15/5 sobre NLV): acción último×qty, crédito BEP×qty, débito el riesgo máx. Es también el techo anti-apalancamiento (si B0+B1+B2+B3 suman >100% del NLV, estás apalancado). Riesgo plausible = riesgo total × factor de corrección por posición (ej. 0.5 = solo la mitad cuenta como pérdida realista); en débito plausible = riesgo total (factor 1). El plausible es la métrica de sizing. P&L es solo seguimiento y nunca entra en el sizing.",
+    body: "Riesgo total = lo que va al barbell (80/15/5 sobre NLV): acción último×qty, crédito BEP×qty, débito el riesgo máx. Es también el techo anti-apalancamiento (si B0+B1+B2+B3 suman >100% del NLV, estás apalancado). Riesgo plausible = base × factor de corrección por posición (ej. 0.5 = solo la mitad cuenta como pérdida realista). La base es el capital comprometido en la entrada: para acciones BEP×qty (no el valor de mercado — así no es procíclico y las primas de covered calls, al rebajar el BEP, reducen el plausible), para crédito BEP×qty; en débito plausible = riesgo total (factor 1). El plausible es la métrica de sizing. P&L es solo seguimiento y nunca entra en el sizing.",
   } : type === "exposicion" ? {
     title: "Exposición por subyacente",
     body: "Agrupa todas las posiciones del mismo ticker (aunque estén en distintos bloques o sean acción + opción) y muestra su peso real: dentro de cada bloque en el que aparece, sobre el MKT VL total, sobre el NLV y sobre el margen usado. % MKT VL es la lectura de concentración más limpia — no depende de cuánta caja tengas aparcada. % NLV es la que usan los objetivos de bloque (10/12%, 70/80%…), porque ese es tu marco de EL/NLV. El circulito antes del ticker es el % NLV de ese subyacente: verde hasta 12%, ámbar hasta 20%, rojo por encima — el mismo umbral que usarías para un límite de concentración por posición individual. Si ya tienes convicción alta en algo (como ASTS) es normal y esperado que salga en rojo; el dot es solo una señal visual, no un tope automático.",
@@ -803,15 +911,29 @@ function VencimientosCard({ rows, onOpen }) {
                     {row.detailRows.map((d, i) => {
                       const b = BLOCKS.find((x) => x.id === d.block);
                       return (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "3px 0" }}>
-                          <span style={{ fontSize: 12, color: T.ink, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        (() => {
+                          /* semáforo: short put en peligro si el último cae bajo el strike; short/covered call en
+                             peligro si el último sube sobre el strike. Verde en el caso contrario, neutro sin precio. */
+                          const lastN = n(d.last), strikeN = n(d.strike);
+                          const hasLast = d.last !== "" && d.last != null && isFinite(lastN) && lastN !== 0 && strikeN !== 0;
+                          const danger = hasLast && (d.right === "C" ? lastN > strikeN : lastN < strikeN);
+                          /* semáforo de asignación por sombreado de fila: rojo suave = strike superado (riesgo de
+                             asignación), verde suave = a salvo, sin fondo = sin precio. El texto queda neutro
+                             (solo la etiqueta de bloque conserva su color) — un único canal visual, sin ruido. */
+                          return (
+                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "5px 8px", borderRadius: 8, background: !hasLast ? "transparent" : danger ? T.tileRed : T.tileGreen }}>
+                          <span style={{ fontSize: 12, color: T.ink, fontWeight: 700, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                             <span style={{ color: b ? b.color : T.sub, fontWeight: 800 }}>{b ? b.name.replace("Bloque ", "B") : ""}</span>
                             {" · " + d.tkr}
-                            {" · x " + d.qtyNum + " " + strikeStr(d.strike) + (d.right === "C" ? "C" : "P")}
+                            {" · x " + d.qtyNum + " "}
+                            <span style={{ fontWeight: 800 }}>{strikeStr(d.strike) + (d.right === "C" ? "C" : "P")}</span>
+                            {hasLast && <span style={{ fontWeight: 700 }}>{" · Últ $" + money2(lastN)}</span>}
                             {" · BEP $" + money2(d.bep)}
                           </span>
-                          <span style={{ fontSize: 12, color: T.sub, fontWeight: 800, flexShrink: 0 }}>${money(d.riesgo)}</span>
+                          <span style={{ fontSize: 12, color: T.sub, fontWeight: 800, flexShrink: 0 }}>{d.covered && !d.riesgo ? "cubierta" : "$" + money(d.riesgo)}</span>
                         </div>
+                          );
+                        })()
                       );
                     })}
                   </div>
@@ -1134,12 +1256,16 @@ function AportacionesCard({ flows, setFlows, brokers }) {
 }
 
 /* ---------- swipe a la izquierda para eliminar ---------- */
-function SwipeDelete({ onDelete, children }) {
+function SwipeDelete({ onDelete, disabled, children }) {
   const [dx, setDx] = useState(0);
   const ref = React.useRef({ x: 0, y: 0, drag: null, base: 0 });
   const W = 92;
-  const onTouchStart = (e) => { const t = e.touches[0]; ref.current = { x: t.clientX, y: t.clientY, drag: null, base: dx }; };
+  /* con disabled (fila expandida en edición o roll) el swipe se desactiva por completo: el panel de roll
+     tiene una tabla con scroll horizontal propio y el gesto chocaba con el deslizable de eliminar */
+  useEffect(() => { if (disabled && dx !== 0) setDx(0); }, [disabled]);
+  const onTouchStart = (e) => { if (disabled) return; const t = e.touches[0]; ref.current = { x: t.clientX, y: t.clientY, drag: null, base: dx }; };
   const onTouchMove = (e) => {
+    if (disabled) return;
     const t = e.touches[0]; const r = ref.current;
     const mx = t.clientX - r.x, my = t.clientY - r.y;
     if (r.drag == null) { if (Math.abs(mx) < 8 && Math.abs(my) < 8) return; r.drag = Math.abs(mx) > Math.abs(my) * 1.2; }
@@ -1149,12 +1275,14 @@ function SwipeDelete({ onDelete, children }) {
   const onTouchEnd = () => { ref.current.drag = null; setDx((d) => (d < -W / 2 ? -W : 0)); };
   return (
     <div style={{ position: "relative", overflow: "hidden" }}>
+      {!disabled && (
       <div style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: W, display: "flex" }}>
         <button onClick={() => { setDx(0); onDelete(); }} style={{ flex: 1, margin: "10px 0", border: "none", borderRadius: 14, background: T.red, color: "#fff", fontSize: 12.5, fontWeight: 800, cursor: "pointer", opacity: dx < -10 ? 1 : 0, transition: "opacity 0.15s" }}>Eliminar</button>
       </div>
+      )}
       <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         onClickCapture={(e) => { if (dx !== 0) { e.stopPropagation(); e.preventDefault(); setDx(0); } }}
-        style={{ transform: `translateX(${dx}px)`, transition: ref.current.drag ? "none" : "transform 0.2s ease", background: T.card, position: "relative" }}>
+        style={{ transform: dx ? `translateX(${dx}px)` : "none", transition: ref.current.drag ? "none" : "transform 0.2s ease", background: T.card, position: "relative" }}>{/* transform solo si hay desplazamiento: un transform permanente rompe el position:fixed de las hojas de roll/cierre (quedaban recortadas dentro de la fila) */}
         {children}
       </div>
     </div>
@@ -1162,7 +1290,73 @@ function SwipeDelete({ onDelete, children }) {
 }
 
 /* ---------- fila de posición ---------- */
-function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose, onReopen, pctBloque, pctCartera, showPnl, brokers, hideBroker }) {
+/* ---------- Tabla de patas / cadena de rolls: componente compartido. Es exactamente la misma tabla que se
+   ve en Movimientos → Estrategias al expandir una posición, y también se muestra dentro del panel de "Rolar"
+   para que el histórico completo esté delante al decidir el nuevo strike/expiry. Scroll horizontal en móvil. ---------- */
+function RollChainTable({ p }) {
+  const chain = p.rollChain || [];
+  const rightLabel = p.right === "C" ? "CALL" : "PUT";
+  const shortSide = natOf(p) === "CRED"; // corta: apertura = VENTA, recompra = COMPRA
+  const q = n(p.qty);
+  /* PMCC: el strike de la short no representa el riesgo real de la operación (que es de débito, cubierto
+     por la long). La última columna pasa a ser %Riesgo = prima de cada pata / BEP actual del PMCC (débito
+     neto por acción), en vez de %Strike. */
+  const pmcc = isPMCC(p);
+  const retLabel = pmcc ? "%Riesgo" : "%Strike";
+  const retDenom = pmcc ? Math.abs(pmccNetDebit(p)) : null;
+  const retOf = (perShare, strike) => (pmcc ? (retDenom ? perShare / retDenom : NaN) : (n(strike) ? perShare / n(strike) : NaN));
+  const openingPrima = chain.length > 0 ? n(chain[0].prevPrima) : n(p.prima);
+  const openingStk = chain.length > 0 ? chain[0].prevStrike : p.strike;
+  const openingExp = chain.length > 0 ? chain[0].prevExpiry : p.expiry;
+  const stkAfter = (idx) => (idx + 1 < chain.length ? chain[idx + 1].prevStrike : p.strike);
+  const expAfter = (idx) => (idx + 1 < chain.length ? chain[idx + 1].prevExpiry : p.expiry);
+  const LegRow = ({ date, action, strike, expiry, perShare, amount, fee, ivr, ret, isBuy, isExp }) => {
+    const legDays = daysBetween(date, expiry);
+    return (
+      <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(date)}</span>
+        <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{action} {rightLabel}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{strikeStr(strike)}{p.right}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, whiteSpace: "nowrap" }}>{expiry ? shortDate(expiry) : "—"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(legDays) ? legDays + "d" : "—"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{ivr || "—"}</span>
+        <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{fee ? "$" + money2(fee) : "—"}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(perShare))}</span>
+        <span style={{ fontSize: 13, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(amount))}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>
+      </div>
+    );
+  };
+  const rows = [];
+  const openAmt = openingPrima * q;
+  rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStk} expiry={openingExp} perShare={openingPrima} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} ret={retOf(openingPrima, openingStk)} isBuy={!shortSide} />);
+  chain.forEach((r, idx) => {
+    const buyAmt = n(r.buybackCost) * q, sellAmt = n(r.newCredit) * q;
+    rows.push(<LegRow key={"b" + idx} date={r.date} action={shortSide ? "COMPRA" : "VENTA"} strike={r.prevStrike} expiry={r.prevExpiry} perShare={n(r.buybackCost)} amount={buyAmt} fee={n(r.comision)} isBuy={shortSide} />);
+    rows.push(<LegRow key={"s" + idx} date={r.date} action={shortSide ? "VENTA" : "COMPRA"} strike={stkAfter(idx)} expiry={expAfter(idx)} perShare={n(r.newCredit)} amount={sellAmt} ivr={r.ivr} ret={retOf(n(r.newCredit), stkAfter(idx))} isBuy={!shortSide} />);
+    if (r.note) rows.push(<div key={"n" + idx} style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 6px 4px", lineHeight: 1.4 }}>💬 {r.note}</div>);
+  });
+  if (p.closed) {
+    const closeAmt = n(p.closePrice) * q;
+    const isExp = n(p.closePrice) === 0;
+    rows.push(<LegRow key="close" date={p.closeDate} action={isExp ? "EXPIRA" : (shortSide ? "COMPRA" : "VENTA")} strike={p.strike} expiry={p.expiry} perShare={n(p.closePrice)} amount={closeAmt} fee={n(p.closeComision)} isBuy={shortSide && !isExp} isExp={isExp} />);
+    if (p.closeNote) rows.push(<div key="cn" style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 4px 4px", lineHeight: 1.4 }}>💬 {p.closeNote}</div>);
+  }
+  return (
+    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", margin: "0 -12px", padding: "0 12px" }}>
+      <div style={{ minWidth: 758 }}>{/* 680px de columnas + 54px de gaps + 20px de padding de fila: si no, la última columna (%Strike/%Riesgo) se sale del cuadro */}
+        <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
+          {["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", retLabel].map((h, i) => (
+            <span key={h} style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: i >= 4 ? "right" : "left" }}>{h}</span>
+          ))}
+        </div>
+        {rows}
+      </div>
+    </div>
+  );
+}
+
+function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll, onClose, onReopen, pctBloque, pctCartera, showPnl, brokers, hideBroker, pendingAction, clearPending, onRollingChange, coveredLabel }) {
   const detail = optionDetail(p);
   const nat = natOf(p);
   const cap = capDesplegado(p);
@@ -1179,6 +1373,9 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
   const canRoll = !!onRoll && !p.closed && opt && natOf(p) === "CRED"; // roll de cadena: solo opciones cortas (Short Put/Short Call, nat=Crédito)
   const canClose = !!onClose && !p.closed && (nat === "ACC" || nat === "COLLAR" || opt); // acciones/collar/cualquier opción se pueden cerrar
   const [rolling, setRolling] = useState(false);
+  /* "Avanzado" del editor (valor mercado / margen / P&L): plegado por defecto; abierto de inicio si el
+     P&L está en Manual — señal de que la posición no tiene precio autodescargable y ese campo SÍ se usa */
+  const [showAdv, setShowAdv] = useState(() => !isAutoPnl(p) || p.mktModo === "MANUAL");
   const [rollDate, setRollDate] = useState("");
   const [rollStrike, setRollStrike] = useState("");
   const [rollExpiry, setRollExpiry] = useState("");
@@ -1197,14 +1394,36 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
   const [closePriceV, setClosePriceV] = useState("");
   const [closeComisionV, setCloseComisionV] = useState("");
   const [closeNoteV, setCloseNoteV] = useState("");
-  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setCloseNoteV(""); setClosing(true); };
+  const [closeLongPriceV, setCloseLongPriceV] = useState(""); // PMCC: precio de venta de la pata larga
+  const [closeLongComisionV, setCloseLongComisionV] = useState("");
+  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setCloseNoteV(""); setCloseLongPriceV(""); setCloseLongComisionV(""); setClosing(true); };
   const confirmClose = () => {
-    onClose({ date: closeDateV, price: closePriceV, comision: closeComisionV, note: closeNoteV });
+    onClose({ date: closeDateV, price: closePriceV, comision: closeComisionV, note: closeNoteV, longPrice: closeLongPriceV, longComision: closeLongComisionV });
     setClosing(false);
   };
+  useEffect(() => {
+    if (pendingAction && pendingAction.id === p.id) {
+      if (pendingAction.action === "roll") openRoll();
+      if (pendingAction.action === "close") openClose();
+      clearPending && clearPending();
+    }
+  }, [pendingAction]);
+  /* avisa hacia arriba cuando hay una hoja de roll/cierre abierta (BlockCard desactiva el swipe-eliminar) */
+  useEffect(() => { onRollingChange && onRollingChange(rolling || closing); return () => { onRollingChange && onRollingChange(false); }; }, [rolling, closing]);
   return (
     <div style={{ borderTop: `1px solid ${T.line}`, padding: "10px 0" }}>
-      <div onClick={onToggle} style={{ cursor: "pointer" }}>
+      {coveredLabel && coveredLabel.length > 0 && natOf(p) === "ACC" && (
+        <div style={{ background: T.tilePurple, borderLeft: `3px solid ${T.purple}`, borderRadius: 8, padding: "5px 9px", marginBottom: 7 }}>
+          <div style={{ fontSize: 10, fontWeight: 800, color: T.purple, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: coveredLabel.length > 1 ? 3 : 0, display: "flex", alignItems: "center", gap: 6 }}>
+            <span>🛡️ {coveredLabel.length === 1 ? (coveredLabel[0].kind === "collar" ? "Collar" : "Covered") : "Cobertura"}</span>
+            {coveredLabel.length === 1 && <span style={{ fontSize: 10.5, fontWeight: 700, textTransform: "none", letterSpacing: 0 }}>{coveredLabel[0].kind === "collar" ? coveredLabel[0].label : "call vendida: " + coveredLabel[0].label}</span>}
+          </div>
+          {coveredLabel.length > 1 && coveredLabel.map((e, i) => (
+            <div key={i} style={{ fontSize: 10.5, fontWeight: 700, color: T.purple, lineHeight: 1.5 }}>{(e.kind === "collar" ? "Collar" : "CC") + " · " + e.label}</div>
+          ))}
+        </div>
+      )}
+      <div onClick={editing ? onDone : onToggle} style={{ cursor: "pointer" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
@@ -1243,8 +1462,14 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
         )}
       </div>
 
-      {editing && (
-        <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+      {editing && !rolling && (
+        <div onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+          style={{ marginTop: 10, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+          <div style={{ gridColumn: "span 2", display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <span style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>✏️ Editar posición</span>
+            <span style={{ fontSize: 9.5, fontWeight: 600, color: T.sub }}>se guarda al instante</span>
+          </div>
+          <EditSection icon="📌" title="Posición" first />
           {!hideBroker && (
           <label>
             <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Broker</span>
@@ -1258,7 +1483,7 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
               style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 11, color: p.entryDate ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
           </div>
           <SelectField label="Estrategia" value={p.tipo} options={STRATS[p.block] || []} span={2}
-            onChange={(val) => { onChange("tipo")(val); const newNat = natFromStrat(val); onChange("nat")(newNat); if (newNat === "CASH") onChange("tkr")("CASH"); }} />
+            onChange={(val) => { onChange("tipo")(val); const newNat = natFromStrat(val); onChange("nat")(newNat); if (newNat === "CASH") onChange("tkr")("CASH"); if (newNat === "CRED") onChange("right")(val.toLowerCase().includes("call") ? "C" : "P"); }} />
           {!cash && (isOptionNat(p) ? (
             <EditField label="Cantidad (contratos)" span={2}
               value={p.qty === "" || p.qty == null ? "" : String(n(p.qty) / 100)}
@@ -1268,15 +1493,23 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
           ))}
           <label style={{ gridColumn: "span 2" }}>
             <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Tipo · define riesgo total y plausible</span>
-            <Pill options={natsForBlock(p.block).map((x) => x.label)} value={(NATS.find((x) => x.id === natOf(p)) || {}).label} onChange={(lbl) => { const newNat = (NATS.find((x) => x.label === lbl) || {}).id || "ACC"; onChange("nat")(newNat); if (newNat === "CASH") onChange("tkr")("CASH"); }} size="sm" />
+            <Pill options={natsForBlock(p.block).map((x) => x.label)} value={((natsForBlock(p.block).find((x) => x.id === natOf(p)) || NATS.find((x) => x.id === natOf(p))) || {}).label} onChange={(lbl) => { const newNat = ((natsForBlock(p.block).find((x) => x.label === lbl) || NATS.find((x) => x.label === lbl)) || {}).id || "ACC"; onChange("nat")(newNat); if (newNat === "CASH") onChange("tkr")("CASH"); }} size="sm" />
           </label>
           {isOptionNat(p) && (
             <>
-              <EditField label="Strike" value={p.strike} onChange={onChange("strike")} />
-              <label>
-                <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Put / Call</span>
-                <Pill options={["P", "C"]} value={p.right} onChange={onChange("right")} size="sm" />
-              </label>
+              <EditSection icon="📃" title="Contrato" />
+              {natOf(p) === "CRED" && (
+                <div style={{ gridColumn: "span 2", display: "flex", alignItems: "center", justifyContent: "space-between", background: T.tile, borderRadius: 12, padding: "8px 11px" }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: T.ink }}>{isPMCC(p) ? "Call vendida (short)" : (p.right === "C" ? "Call" : "Put")} <span style={{ color: T.sub, fontWeight: 600 }}>· lo determina la estrategia ({p.tipo || "—"})</span></span>
+                </div>
+              )}
+              <EditField label={isPMCC(p) ? "Strike short" : "Strike"} value={p.strike} onChange={onChange("strike")} span={natOf(p) === "CRED" ? 2 : 1} />
+              {natOf(p) !== "CRED" && (
+                <label>
+                  <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Put / Call</span>
+                  <Pill options={["P", "C"]} value={p.right} onChange={onChange("right")} size="sm" />
+                </label>
+              )}
               <div style={{ gridColumn: "span 2" }}>
                 <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Expiry</span>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -1287,26 +1520,89 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
               </div>
             </>
           )}
+          {!cash && <EditSection icon="💲" title="Precios y entrada" />}
           {!cash && (bepAutoStrat(p) ? (
-            <EditField label={"Prima (" + (bepAutoStrat(p) === "CREDIT" ? "crédito recibido" : "débito pagado") + ") · por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
+            <EditField label={isPMCC(p) ? "Prima short cobrada $/acc" : "Prima por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
           ) : (
             <EditField label="BEP" prefix="$" value={p.bep} onChange={onChange("bep")} />
           ))}
           {!cash && <EditField label="Comisión (entrada)" prefix="$" value={p.comision} onChange={onChange("comision")} />}
           {isOptionNat(p) && <EditField label="IVR al abrir" value={p.ivr} onChange={onChange("ivr")} />}
           {!cash && <EditField label="Último (precio actual)" prefix="$" value={p.last} onChange={onChange("last")} />}
-          {!cash && bepAutoStrat(p) && (
+          {!cash && bepAutoStrat(p) && !isPMCC(p) && (
             <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>BEP (auto) = Strike {bepAutoStrat(p) === "CREDIT" ? "−" : "+"} Prima</span>
               <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800 }}>${money2(effBep(p))}</span>
             </div>
           )}
+          {!cash && isPMCC(p) && (
+            <>
+              <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px" }}>
+                <div style={{ fontSize: 10, color: T.green, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 4 }}>Pata long · call comprada</div>
+                <div style={{ fontSize: 12, color: T.ink, fontWeight: 700 }}>Strike ${money2(n((p.long || {}).strike))} · Prima pagada ${money2(n((p.long || {}).prima))}/acc{(p.long || {}).expiry ? " · vto " + ibkrDate((p.long || {}).expiry) : ""}</div>
+              </div>
+              <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>BEP (auto) = prima long − short</span>
+                <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800 }}>${money2(effBep(p))}</span>
+              </div>
+            </>
+          )}
+          {!cash && natOf(p) === "CRED" && (
+            <div style={{ gridColumn: "span 2", background: T.tileGreen, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.green, fontWeight: 700 }}>Crédito recibido = Prima × Cantidad</span>
+              <span style={{ fontSize: 14.5, color: T.green, fontWeight: 800 }}>${money2(n(p.prima) * n(p.qty))}</span>
+            </div>
+          )}
+          <EditSection icon="🛡️" title={cash ? "Importe" : "Riesgo y valoración"} />
           {cash ? (
             <div style={{ gridColumn: "span 2" }}>
               <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Importe (USD)</span>
               <EditField label="" prefix="$" value={p.mktValue} onChange={onChange("mktValue")} signed />
             </div>
-          ) : (
+          ) : null}
+          {cash && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>Cuenta como (auto)</span>
+              <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800 }}>${money2(capDesplegado(p))}</span>
+            </div>
+          )}
+          {!cash && (natOf(p) === "COLLAR" || (natOf(p) === "DEF" && !isLongCallPos(p))) && (
+            <EditField label={natOf(p) === "COLLAR" ? "Riesgo fijo del collar" : "Riesgo máx / total (def. BEP×qty)"} prefix="$" value={p.riesgo} onChange={onChange("riesgo")} span={2} />
+          )}
+          {!cash && isLongCallPos(p) && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>Riesgo = prima pagada (auto)</span>
+              <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800 }}>${money2(longCallCost(p))}</span>
+            </div>
+          )}
+          {/* riesgo total y plausible, cada uno en su propia línea a ancho completo para que se lea con claridad */}
+          {!cash && p.block !== 0 && (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>Riesgo total (auto)</span>
+              <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800, whiteSpace: "nowrap" }}>${money2(capDesplegado(p))}</span>
+            </div>
+          )}
+          {/* en B0 (liquidez/colchón) el riesgo plausible no aplica: ni tile ni factor */}
+          {!cash && p.block !== 0 && (
+            <div style={{ gridColumn: "span 2", background: T.tileGreen, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ fontSize: 11, color: T.green, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.3 }}>Riesgo plausible</span>
+              <span style={{ fontSize: 14.5, color: T.green, fontWeight: 800, whiteSpace: "nowrap" }}>${money2(plausibleOf(p))}</span>
+            </div>
+          )}
+          {!cash && p.block !== 0 && (natOf(p) === "ACC" || natOf(p) === "CRED") && (
+            <EditField label="Factor riesgo plausible" value={p.factor} onChange={onChange("factor")} span={2} smallLabel />
+          )}
+          {!cash && natOf(p) === "ACC" && p.plausBep !== "" && p.plausBep != null && (
+            <EditField label="BEP plausible (fijado por collar · vacío = normal)" prefix="$" value={p.plausBep} onChange={onChange("plausBep")} span={2} smallLabel />
+          )}
+          {/* Valor mercado, Margen y P&L viven plegados tras "Avanzado": se tocan poco tras crear la posición.
+             Se abre solo automáticamente si el P&L está en Manual (posiciones sin precio autodescargable). */}
+          {!cash && (
+            <button type="button" onClick={() => setShowAdv((v) => !v)} style={{ gridColumn: "span 2", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 11, padding: "9px 0", fontSize: 12, fontWeight: 700, color: T.sub, cursor: "pointer" }}>
+              ⚙️ Avanzado · valor mercado, margen y P&L {showAdv ? "▴" : "▾"}
+            </button>
+          )}
+          {!cash && showAdv && (
             <div style={{ gridColumn: "span 2" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
                 <span style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Valor mercado</span>
@@ -1321,23 +1617,7 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
               )}
             </div>
           )}
-          <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>{cash ? "Cuenta como (auto)" : "Riesgo total (auto)"}</span>
-            <span style={{ fontSize: 14.5, color: T.ink, fontWeight: 800 }}>${money2(capDesplegado(p))}</span>
-          </div>
-          {(natOf(p) === "DEF" || natOf(p) === "COLLAR") && (
-            <EditField label={natOf(p) === "COLLAR" ? "Riesgo fijo del collar" : "Riesgo máx / total (def. BEP×qty)"} prefix="$" value={p.riesgo} onChange={onChange("riesgo")} span={2} />
-          )}
-          {(natOf(p) === "ACC" || natOf(p) === "CRED") && (
-            <EditField label="Factor riesgo plausible" value={p.factor} onChange={onChange("factor")} span={2} smallLabel />
-          )}
-          {!cash && (
-            <div style={{ gridColumn: "span 2", background: T.tileGreen, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ fontSize: 11, color: T.green, fontWeight: 700 }}>Riesgo plausible (sizing)</span>
-              <span style={{ fontSize: 14.5, color: T.green, fontWeight: 800 }}>${money2(plausibleOf(p))}</span>
-            </div>
-          )}
-          {!cash && (
+          {!cash && showAdv && (
           <label style={{ gridColumn: "span 2" }}>
             <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 5, textTransform: "uppercase", letterSpacing: 0.4 }}>Margen</span>
             <div style={{ marginBottom: 6 }}>
@@ -1361,10 +1641,10 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
             )}
           </label>
           )}
-          {!cash && (
+          {!cash && showAdv && (
           <label style={{ gridColumn: "span 2" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
-              <span style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>P&L</span>
+              <span style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>P&L{isAutoPnl(p) ? "" : " · para posiciones sin precio autodescargable"}</span>
               <Pill options={["Auto", "Manual"]} value={isAutoPnl(p) ? "Auto" : "Manual"} onChange={(v) => onChange("pnlModo")(v === "Auto" ? "AUTO" : "MANUAL")} size="sm" />
             </div>
             {isAutoPnl(p) ? (
@@ -1382,80 +1662,140 @@ function PositionRow({ p, editing, onToggle, onChange, onDelete, onRoll, onClose
             )}
           </label>
           )}
-          {canRoll && (
-            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "10px 11px" }}>
-              {rollChain.length > 0 && (
-                <div style={{ fontSize: 11, color: T.sub, fontWeight: 700, marginBottom: 8 }}>
-                  🔄 Rolado ×{rollChain.length} · entrada original {optionDetail({ strike: rollChain[0].prevStrike, expiry: rollChain[0].prevExpiry, right: p.right })}
-                </div>
-              )}
-              {!rolling ? (
-                <button type="button" onClick={openRoll} style={{ width: "100%", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>🔄 Rolar esta posición (misma entrada)</button>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 8 }}>
-                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600 }}>El histórico ({optionDetail(p)}) queda guardado en la cadena. Precios por acción — se multiplican ×{n(p.qty) || 100} al calcular el cash</div>
-                  <div>
-                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha del roll</span>
-                    <input type="date" value={rollDate} onChange={(e) => setRollDate(e.target.value)}
-                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: rollDate ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
-                  </div>
-                  <EditField label="Nuevo strike" value={rollStrike} onChange={setRollStrike} />
-                  <div>
-                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Nuevo expiry</span>
-                    <input type="date" value={rollExpiry} onChange={(e) => setRollExpiry(e.target.value)}
-                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: rollExpiry ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
-                  </div>
-                  <EditField label="Prima recompra (por acción)" prefix="$" value={rollBuyback} onChange={setRollBuyback} />
-                  <EditField label="Prima nueva venta (por acción)" prefix="$" value={rollCredit} onChange={setRollCredit} />
-                  <EditField label="Comisión" prefix="$" value={rollComision} onChange={setRollComision} />
-                  <EditField label="IVR del roll" value={rollIvr} onChange={setRollIvr} />
-                  <EditField label="Comentario (feedback / motivo del roll)" value={rollNote} onChange={setRollNote} text />
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button type="button" onClick={() => setRolling(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
-                    <button type="button" onClick={confirmRoll} disabled={!rollStrike || !rollExpiry || !rollDate} style={{ flex: 1, background: T.green, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!rollStrike || !rollExpiry || !rollDate) ? 0.5 : 1 }}>Confirmar roll</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-          {canClose && (
-            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "10px 11px" }}>
-              {!closing ? (
-                <button type="button" onClick={openClose} style={{ width: "100%", background: "transparent", border: `1.5px dashed ${T.line}`, borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>✕ Cerrar posición</button>
-              ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, gridColumn: "span 2" }}>{opt ? "Precio de recompra para cerrar la opción" : "Precio de venta para cerrar la posición"} · por acción</div>
-                  <div>
-                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha de cierre</span>
-                    <input type="date" value={closeDateV} onChange={(e) => setCloseDateV(e.target.value)}
-                      style={{ width: "100%", boxSizing: "border-box", height: 40, background: T.card, border: `1.5px solid ${T.line}`, borderRadius: 11, color: closeDateV ? T.ink : T.sub, fontSize: 14, fontWeight: 700, padding: "0 10px", outline: "none" }} />
-                  </div>
-                  <EditField label={opt ? "Precio de recompra" : "Precio de venta"} prefix="$" value={closePriceV} onChange={setClosePriceV} />
-                  <EditField label="Comisión de cierre" prefix="$" value={closeComisionV} onChange={setCloseComisionV} span={2} />
-                  <EditField label="Comentario (feedback / motivo del cierre)" value={closeNoteV} onChange={setCloseNoteV} text span={2} />
-                  <div style={{ gridColumn: "span 2", display: "flex", gap: 8 }}>
-                    <button type="button" onClick={() => setClosing(false)} style={{ flex: 1, background: T.card, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer" }}>Cancelar</button>
-                    <button type="button" onClick={confirmClose} disabled={!closeDateV || !closePriceV} style={{ flex: 1, background: T.red, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer", opacity: (!closeDateV || !closePriceV) ? 0.5 : 1 }}>Confirmar cierre</button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+          {p.closed && !!onReopen && <EditSection icon="⚡" title="Acciones" />}
           {p.closed && !!onReopen && (
             <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ fontSize: 11, color: T.sub, fontWeight: 700 }}>Cerrada el {ibkrDate(p.closeDate)} a ${money2(n(p.closePrice))}</span>
               <button type="button" onClick={onReopen} style={{ background: "transparent", border: "none", fontSize: 12, fontWeight: 700, color: T.purple, cursor: "pointer" }}>Reabrir</button>
             </div>
           )}
-          <button onClick={onDelete} style={{ gridColumn: "span 2", background: "transparent", border: "none", borderRadius: 10, padding: "8px 0", fontSize: 13, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar posición</button>
+          <button type="button" onClick={onDone} style={{ gridColumn: "span 2", marginTop: 4, background: T.dark, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 800, color: "#fff", cursor: "pointer" }}>✓ Listo</button>
+          <button onClick={onDelete} style={{ gridColumn: "span 2", background: "transparent", border: "none", borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.red, cursor: "pointer", opacity: 0.85 }}>Eliminar posición</button>
         </div>
       )}
+      {rolling && (() => {
+        /* ---------- SHEET DE ROLL: mismo formato que el asistente "Nueva posición" — hoja inferior sobre
+           fondo oscurecido. Tocar fuera la cierra. Arriba el histórico completo de la cadena (misma tabla que
+           Movimientos → Estrategias), debajo campos estilo asistente con el neto del roll calculado en vivo. ---------- */
+        const rollQty = n(p.qty) || 100;
+        const rollNet = n(rollCredit) - n(rollBuyback);
+        const rollNetTotal = rollNet * rollQty;
+        const hasNums = rollCredit !== "" || rollBuyback !== "";
+        const ok = rollStrike && rollExpiry && rollDate;
+        return (
+          <div onClick={() => setRolling(false)} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+            style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 60 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: "26px 26px 0 0", padding: "18px 18px 26px", width: "100%", maxWidth: 560, maxHeight: "86vh", overflowY: "auto", boxSizing: "border-box", boxShadow: "0 -10px 40px rgba(0,0,0,0.35)" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 4 }}>
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>🔄 Rolar {p.tkr}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>{optionDetail(p)} · precios por acción, ×{rollQty} al calcular el cash{p.covered && p.right === "C" ? " · el neto del roll ajusta el BEP de la acción cubierta" : ""}</div>
+                </div>
+                <button onClick={() => setRolling(false)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0 6px" }}>
+                <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Histórico de la posición</span>
+                <span style={{ fontSize: 10, fontWeight: 800, color: T.purple, background: T.tilePurple, borderRadius: 8, padding: "2px 7px" }}>{rollChain.length > 0 ? "Rolado ×" + rollChain.length : "Primer roll"}</span>
+              </div>
+              <div style={{ background: T.tile, borderRadius: 14, padding: "10px 12px", marginBottom: 14 }}>
+                <RollChainTable p={p} />
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <WizInput label="Fecha del roll" value={rollDate} onChange={setRollDate} type="date" />
+                <WizInput label="Nuevo expiry" value={rollExpiry} onChange={setRollExpiry} type="date" />
+                <WizInput label="Nuevo strike" value={rollStrike} onChange={setRollStrike} placeholder="$" inputMode="decimal" />
+                <WizInput label="IVR del roll" value={rollIvr} onChange={setRollIvr} inputMode="numeric" />
+                <WizInput label="Prima recompra $/acc" value={rollBuyback} onChange={setRollBuyback} placeholder="$" inputMode="decimal" />
+                <WizInput label="Prima nueva venta $/acc" value={rollCredit} onChange={setRollCredit} placeholder="$" inputMode="decimal" />
+                <WizInput label="Comisión" value={rollComision} onChange={setRollComision} placeholder="$" inputMode="decimal" />
+                <div style={{ background: hasNums ? (rollNet >= 0 ? T.tileGreen : T.tileRed) : T.tile, borderRadius: 12, padding: "8px 12px", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                  <span style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>Neto del roll</span>
+                  <span style={{ fontSize: 15, fontWeight: 800, color: hasNums ? (rollNet >= 0 ? T.green : T.red) : T.sub, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>
+                    {hasNums ? (rollNet >= 0 ? "+$" : "-$") + money2(Math.abs(rollNet)) + " · " + signMoney(rollNetTotal) : "—"}
+                  </span>
+                </div>
+                <div style={{ gridColumn: "span 2" }}>
+                  <WizInput label="Comentario (motivo del roll)" value={rollNote} onChange={setRollNote} />
+                </div>
+              </div>
+              <button onClick={confirmRoll} disabled={!ok} style={{ marginTop: 16, width: "100%", background: ok ? T.green : T.tile, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 800, color: ok ? "#fff" : T.sub, cursor: "pointer" }}>Confirmar roll</button>
+            </div>
+          </div>
+        );
+      })()}
+      {closing && (() => {
+        /* ---------- SHEET DE CIERRE: mismo formato de hoja inferior que el asistente ---------- */
+        const pmcc = isPMCC(p);
+        const ok = closeDateV && closePriceV && (!pmcc || closeLongPriceV !== "");
+        const q = n(p.qty);
+        const px = n(closePriceV);
+        const shortSide = natOf(p) === "CRED";
+        /* estimación en vivo del resultado del cierre: opción corta → prima acumulada − recompra; resto → precio venta − BEP.
+           PMCC → resultado de las DOS patas: short (prima acum − recompra) + long (venta − prima pagada). */
+        const lg = p.long || {};
+        const est = pmcc
+          ? ((closePriceV === "" && closeLongPriceV === "") ? NaN : (n(p.prima) - px) * q + (n(closeLongPriceV) - n(lg.prima)) * q)
+          : (closePriceV === "" ? NaN : (opt ? (shortSide ? (n(p.prima) - px) * q : (px - n(p.prima)) * q) : (px - effBep(p)) * q));
+        return (
+          <div onClick={() => setClosing(false)} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+            style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 60 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: "26px 26px 0 0", padding: "18px 18px 26px", width: "100%", maxWidth: 560, maxHeight: "86vh", overflowY: "auto", boxSizing: "border-box", boxShadow: "0 -10px 40px rgba(0,0,0,0.35)" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 4 }}>
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>✕ Cerrar {p.tkr}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>{pmcc ? "Recompra de la short + venta de la long · por acción" : (opt ? "Precio de recompra" : "Precio de venta") + " · por acción" + (opt ? " · la posición queda archivada con su cadena de rolls" : "")}</div>
+                </div>
+                <button onClick={() => setClosing(false)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
+                <WizInput label="Fecha de cierre" value={closeDateV} onChange={setCloseDateV} type="date" />
+                <WizInput label={pmcc ? "Recompra short $/acc" : (opt ? "Precio recompra $/acc" : "Precio venta $/acc")} value={closePriceV} onChange={setClosePriceV} placeholder={opt ? "0 si expira sin valor" : "$"} inputMode="decimal" />
+                <WizInput label={pmcc ? "Comisión short" : "Comisión de cierre"} value={closeComisionV} onChange={setCloseComisionV} placeholder="$" inputMode="decimal" />
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Resultado est.</div>
+                  <div style={{ boxSizing: "border-box", height: 47, display: "flex", alignItems: "center", padding: "0 12px", borderRadius: 12, background: isFinite(est) ? (est >= 0 ? T.tileGreen : T.tileRed) : T.tile }}>
+                    <span style={{ fontSize: 15.5, fontWeight: 800, color: isFinite(est) ? (est >= 0 ? T.green : T.red) : T.sub, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{isFinite(est) ? signMoney(est) : "—"}</span>
+                  </div>
+                </div>
+                {pmcc && (
+                  <>
+                    <WizInput label="Venta long $/acc" value={closeLongPriceV} onChange={setCloseLongPriceV} placeholder="0 si expira sin valor" inputMode="decimal" />
+                    <WizInput label="Comisión long" value={closeLongComisionV} onChange={setCloseLongComisionV} placeholder="$" inputMode="decimal" />
+                  </>
+                )}
+                <div style={{ gridColumn: "span 2" }}>
+                  <WizInput label="Comentario (motivo del cierre)" value={closeNoteV} onChange={setCloseNoteV} />
+                </div>
+              </div>
+              <button onClick={confirmClose} disabled={!ok} style={{ marginTop: 16, width: "100%", background: ok ? T.red : T.tile, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 800, color: ok ? "#fff" : T.sub, cursor: "pointer" }}>Confirmar cierre</button>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
 
+/* ---------- iconos de navegación: SVG de trazo limpio, heredan color via currentColor ---------- */
+function NavIcon({ name }) {
+  const P = { fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+      {name === "portfolio" && (<g {...P}><rect x="3.5" y="12" width="4.4" height="8" rx="1.4" /><rect x="9.8" y="7" width="4.4" height="13" rx="1.4" /><rect x="16.1" y="3.5" width="4.4" height="16.5" rx="1.4" /></g>)}
+      {name === "movimientos" && (<g {...P}><path d="M20 11a8 8 0 1 0-2.3 6.3" /><path d="M20 5.5V11h-5.5" /></g>)}
+      {name === "vencimientos" && (<g {...P}><rect x="3.5" y="5" width="17" height="15.5" rx="2.5" /><path d="M3.5 9.8h17" /><path d="M8 3v4M16 3v4" /></g>)}
+      {name === "comparador" && (<g {...P}><path d="M12 4v16" /><path d="M5 7h14" /><path d="M5 7l-2.8 6a3 3 0 0 0 5.6 0L5 7z" /><path d="M19 7l-2.8 6a3 3 0 0 0 5.6 0L19 7z" /></g>)}
+      {name === "ajustes" && (<g {...P}><circle cx="12" cy="12" r="3.2" /><path d="M12 2.8v2.7M12 18.5v2.7M2.8 12h2.7M18.5 12h2.7M5.5 5.5l1.9 1.9M16.6 16.6l1.9 1.9M18.5 5.5l-1.9 1.9M7.4 16.6l-1.9 1.9" /></g>)}
+      {name === "primas" && (<g {...P}><circle cx="12" cy="12" r="8.5" /><path d="M12 7.2v9.6M14.8 8.8c-.6-.9-1.7-1.4-2.8-1.4-1.6 0-2.9 1-2.9 2.3s1.3 2 2.9 2.3c1.6.3 2.9 1 2.9 2.3s-1.3 2.3-2.9 2.3c-1.1 0-2.2-.5-2.8-1.4" /></g>)}
+      {name === "mtm" && (<g {...P}><path d="M3.5 20.5h17" /><path d="M4.5 15.5l4.4-4.8 3.5 3.2 6.6-7.4" /><path d="M19 10.2V6.5h-3.7" /></g>)}
+      {name === "estrategias" && (<g {...P}><path d="M12 3.5l8.5 4.4L12 12.3 3.5 7.9 12 3.5z" /><path d="M3.5 12.2l8.5 4.4 8.5-4.4" /><path d="M3.5 16.4l8.5 4.4 8.5-4.4" /></g>)}
+    </svg>
+  );
+}
+
 /* ---------- tarjeta de bloque activo ---------- */
-function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, rollPos, closePos, reopenPos, showPnl, togglePnl, brokers }) {
+function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, rollPos, closePos, reopenPos, showPnl, togglePnl, brokers, onOpenSheet, pendingAction, clearPending, coveredMap }) {
+  const [rollingIds, setRollingIds] = useState(new Set()); // filas con el panel de roll abierto → swipe-eliminar desactivado
   const activePositions = positions.filter((p) => !p.closed);
   const capBlock = activePositions.reduce((s, p) => s + capDesplegado(p), 0);
   const plausibleBlock = activePositions.reduce((s, p) => s + plausibleOf(p), 0);
@@ -1482,10 +1822,11 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-          <MiniStat label="Riesgo total" value={"$" + money(capBlock)} color={blk.color} />
+          {/* B0 es liquidez: su suma no es riesgo, es tamaño — se etiqueta "Total" y no muestra plausible */}
+          <MiniStat label={blk.id === 0 ? "Total" : "Riesgo total"} value={"$" + money(capBlock)} color={blk.color} />
           <MiniStat label="% NLV (total)" value={pct(pctNlv)} color={blk.color} />
-          <MiniStat label="Riesgo plausible" value={"$" + money(plausibleBlock)} />
-          <MiniStat label="% NLV (plausible)" value={pct(pctNlvPlausible)} />
+          {blk.id !== 0 && <MiniStat label="Riesgo plausible" value={"$" + money(plausibleBlock)} />}
+          {blk.id !== 0 && <MiniStat label="% NLV (plausible)" value={pct(pctNlvPlausible)} />}
         </div>
         <div style={{ marginBottom: 14 }}><MiniStat label="P&L" value={signMoney(pnl)} color={pnl > 0 ? T.green : pnl < 0 ? T.red : T.sub} /></div>
 
@@ -1504,8 +1845,11 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
           <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "8px 0" }}>Sin posiciones en este bloque para el broker seleccionado.</div>
         )}
         {positions.map((p) => (
-          <SwipeDelete key={p.id} onDelete={() => delPos(p.id)}>
-            <PositionRow p={p} editing={editSet.has(p.id)} onToggle={() => toggleEdit(p.id)}
+          <SwipeDelete key={p.id} onDelete={() => delPos(p.id)} disabled={editSet.has(p.id) || rollingIds.has(p.id)}>
+            <PositionRow p={p} editing={editSet.has(p.id)} onToggle={() => (onOpenSheet ? onOpenSheet(p) : toggleEdit(p.id))} onDone={() => toggleEdit(p.id)}
+              pendingAction={pendingAction} clearPending={clearPending}
+              onRollingChange={(v) => setRollingIds((s) => { const x = new Set(s); if (v) x.add(p.id); else x.delete(p.id); return x; })}
+              coveredLabel={(coveredMap || {})[p.id]}
               onChange={(k) => (v) => setPos(p.id, k, v)} onDelete={() => delPos(p.id)} showPnl={showPnl} brokers={brokers}
               onRoll={(vals) => rollPos(p.id, vals)} onClose={(vals) => closePos(p.id, vals)} onReopen={() => reopenPos(p.id)}
               pctBloque={capBlock ? capDesplegado(p) / capBlock : NaN} pctCartera={nlv ? capDesplegado(p) / nlv : NaN} />
@@ -1513,7 +1857,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
         ))}
       </div>
 
-      <button onClick={() => addPos(blk.id)} style={{ marginTop: 12, width: "100%", background: T.tile, border: `1.5px dashed ${T.line}`, borderRadius: 12, padding: "10px 0", fontSize: 13.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>+ Posición en {blk.name}</button>
+      {/* alta de posiciones: solo vía el FAB verde "+" (asistente Nueva posición) — el botón por bloque se retiró en v4.45 */}
     </div>
   );
 }
@@ -1534,10 +1878,10 @@ function MovimientosView({ positions, reopenPos }) {
   const [stratStatus, setStratStatus] = useState("Abiertas");
   const [expanded, setExpanded] = useState(new Set());
   const toggleExpand = (id) => setExpanded((s) => { const x = new Set(s); x.has(id) ? x.delete(id) : x.add(id); return x; });
-  const [collapsedMonths, setCollapsedMonths] = useState(new Set());
-  const toggleMonth = (key) => setCollapsedMonths((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
-  const [collapsedYears, setCollapsedYears] = useState(new Set());
-  const toggleYear = (key) => setCollapsedYears((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
+  const [openMonths, setOpenMonths] = useState(new Set());
+  const toggleMonth = (key) => setOpenMonths((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
+  const [openYears, setOpenYears] = useState(new Set());
+  const toggleYear = (key) => setOpenYears((s) => { const x = new Set(s); x.has(key) ? x.delete(key) : x.add(key); return x; });
 
   const openingPrimaPerShare = (p) => {
     const chain = p.rollChain || [];
@@ -1574,11 +1918,12 @@ function MovimientosView({ positions, reopenPos }) {
     if (isOptionNat(p)) {
       const autoStrat = bepAutoStrat(p);
       const chain = p.rollChain || [];
-      if (autoStrat && p.entryDate) {
-        const sign = autoStrat === "CREDIT" ? 1 : -1;
+      if (autoStrat === "CREDIT" && p.entryDate) {
+        /* solo las opciones de CRÉDITO registran prima en la apertura. El débito (Long Call, y la pata larga
+           del PMCC) no se registra hasta que se cierra, igual que las acciones. */
         const fee = n(p.comision);
-        const cash = sign * openingPrimaPerShare(p) * qty - fee;
-        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: bepAutoStrat(p) === "CREDIT" ? n(openingStrike(p)) - n(openingPrimaPerShare(p)) : n(openingStrike(p)) + n(openingPrimaPerShare(p)) });
+        const cash = openingPrimaPerShare(p) * qty - fee;
+        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: n(openingStrike(p)) - n(openingPrimaPerShare(p)) });
       }
       chain.forEach((r, idx) => {
         const fee = n(r.comision);
@@ -1595,6 +1940,16 @@ function MovimientosView({ positions, reopenPos }) {
         const legEntry = chain.length > 0 ? n(chain[chain.length - 1].newCredit) : openingPrimaPerShare(p);
         const realizedClose = dirSign(p) * (n(p.closePrice) - legEntry) * qty - fee;
         mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: n(p.closePrice) === 0 ? "Expirada" : "Cierre", cash: realizedClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "" });
+      }
+      /* PMCC: la pata LARGA (call comprada, débito) no se registró al abrir. Al cerrar el PMCC, si se indica
+         el precio de venta de la long, se registra su cash (venta) en Primas y su resultado realizado en MTM. */
+      if (isPMCC(p) && p.closed && p.closeLongPrice !== "" && p.closeLongPrice != null) {
+        const lg = p.long || {};
+        const lgFee = n(p.closeLongComision);
+        const cashLong = n(p.closeLongPrice) * qty - lgFee;
+        primaEvents.push({ id: p.id + "-longclose", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre long", cash: cashLong, fee: lgFee, strike: lg.strike, right: "C", qty: qtyLabelOf(p), expiry: lg.expiry, bep: n(lg.prima), note: "Pata larga · " + (p.closeNote || "") });
+        const realizedLong = (n(p.closeLongPrice) - n(lg.prima)) * qty - lgFee;
+        mtmEvents.push({ id: p.id + "-longclosemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre long", cash: realizedLong, fee: lgFee, strike: lg.strike, right: "C", qty: qtyLabelOf(p), expiry: lg.expiry, bep: n(lg.prima), note: "Pata larga · " + (p.closeNote || "") });
       }
     } else if ((natOf(p) === "ACC" || natOf(p) === "COLLAR") && p.closed && p.closePrice !== "" && p.closePrice != null) {
       const fee = n(p.closeComision);
@@ -1628,12 +1983,13 @@ function MovimientosView({ positions, reopenPos }) {
   const monthLabel = (key) => { if (key === "sin-fecha") return "Sin fecha"; const [y, m] = key.split("-"); return MESES[Number(m) - 1] + " " + y; };
 
   /* ---------- Estrategias: todas las posiciones archivadas por tipo ---------- */
-  const STRAT_CATS = ["Acciones", "Covered Calls", "Short Puts", "PMCC", "DC/DD", "Otras"];
+  const STRAT_CATS = ["Acciones", "Covered Calls", "Short Puts", "Long Calls", "PMCC", "DC/DD", "Otras"];
   const categoryOf = (p) => {
     const t = (p.tipo || "").toLowerCase();
     if (isCashNat(p)) return null; // cash no es una estrategia
     if (natOf(p) === "ACC") return "Acciones";
     if (t === "pmcc") return "PMCC";
+    if (isLongCallPos(p)) return "Long Calls";
     if (["dc", "dd", "diagonal", "calendar"].includes(t)) return "DC/DD";
     if (t === "short put") return "Short Puts";
     if (t === "short call") return "Covered Calls";
@@ -1649,18 +2005,21 @@ function MovimientosView({ positions, reopenPos }) {
 
   const primaSumOf = (p) => primaEvents.filter((e) => e.posId === p.id).reduce((s, e) => s + e.cash, 0);
   const mtmSumOf = (p) => mtmEvents.filter((e) => e.posId === p.id).reduce((s, e) => s + e.cash, 0);
-  const daysBetween = (d0, d1) => (!d0 || !d1) ? NaN : Math.round((new Date(d1 + "T00:00:00") - new Date(d0 + "T00:00:00")) / 86400000);
   const todayIso = new Date().toISOString().slice(0, 10);
   const shortDate = (iso) => { if (!iso) return ""; const [y, m, d] = iso.split("-"); return `${d}/${m}/${y.slice(-2)}`; };
 
   return (
     <>
       <div style={{ display: "flex", gap: 6, background: T.card, borderRadius: 18, padding: 6, marginBottom: 14, boxShadow: T.shadow }}>
-        {[["primas", "💰 Primas"], ["mtm", "📊 MTM"], ["estrategias", "🗂️ Estrategias"]].map(([id, label]) => (
+        {[["primas", "Primas"], ["mtm", "MTM"], ["estrategias", "Estrategias"]].map(([id, label]) => (
           <button key={id} onClick={() => setSub(id)} style={{
-            flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 0", fontSize: 12.5, fontWeight: 800,
+            flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "8px 0 7px", fontSize: 12, fontWeight: 700,
+            display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
             background: sub === id ? T.dark : "transparent", color: sub === id ? "#fff" : T.sub,
-          }}>{label}</button>
+          }}>
+            <NavIcon name={id} />
+            <span>{label}</span>
+          </button>
         ))}
       </div>
 
@@ -1688,23 +2047,23 @@ function MovimientosView({ positions, reopenPos }) {
             </div>
           )}
           {yearKeys.map((y) => {
-            const yCollapsed = collapsedYears.has(y);
+            const yCollapsed = !openYears.has(y);
             return (
             <div key={y} style={{ marginTop: 10 }}>
-              <div onClick={() => toggleYear(y)} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", background: T.dark, borderRadius: 12, padding: "10px 10px 10px 0", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
-                <span style={{ fontSize: 13, fontWeight: 800, color: "#fff", textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>
-                  {y === "sin-fecha" ? "Sin fecha" : y}
+              <div onClick={() => toggleYear(y)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", background: T.dark, borderRadius: 12, padding: "10px 10px 10px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: "#fff", textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  {y === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + y}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 800, color: "#C4CCD4", textAlign: "right", paddingRight: 10 }}>${money2(yearTotals[y].fees)}</span>
                 <span style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 10 }}>{signMoney(yearTotals[y].total)}</span>
               </div>
               {!yCollapsed && monthsOfYear(y).map((key) => {
-            const isCollapsed = collapsedMonths.has(key);
+            const isCollapsed = !openMonths.has(key);
             return (
             <div key={key} style={{ marginTop: 4 }}>
-              <div onClick={() => toggleMonth(key)} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 10px 8px 0", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
-                <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5, gridColumn: "span 2" }}>
-                  {monthLabel(key)}
+              <div onClick={() => toggleMonth(key)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 10px 8px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5 }}>
+                  {key === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + monthLabel(key)}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 10 }}>${money2(monthGroups[key].fees)}</span>
                 <span style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 10 }}>{signMoney(monthGroups[key].total)}</span>
@@ -1796,10 +2155,18 @@ function MovimientosView({ positions, reopenPos }) {
             const isOpt = isOptionNat(p);
             const primaSum = primaSumOf(p);
             const result = isOpt ? primaSum : mtmSumOf(p);
-            const riesgo = capDesplegado(p);
+            /* riesgo de la estrategia para el histórico: en opciones cortas siempre BEP × acciones (contratos ×100),
+               aunque en cartera compute 0 por estar cubierta — aquí interesa el capital que respaldó la operación */
+            const riesgo = isOpt && natOf(p) === "CRED" ? (isPMCC(p) ? riesgoTotalOf(p) : Math.abs(n(effBep(p)) * n(p.qty))) : capDesplegado(p);
             const rom = isOpt && riesgo ? primaSum / riesgo : NaN;
             const dte = isOpt ? daysBetween(p.entryDate, p.expiry) : NaN;
             const dit = daysBetween(p.entryDate, p.closed ? p.closeDate : todayIso);
+            /* anualizado del ROI (prima/riesgo): mientras está abierta se proyecta sobre el periodo total
+               previsto de la operación — de la apertura original al vencimiento vigente (el mismo dte de
+               arriba, que ya incorpora los rolls: si se rolo, el vencimiento es el nuevo pero la apertura
+               sigue siendo la primera). Al cerrarse, se usa el DIT real (apertura → cierre). */
+            const annPeriod = p.closed ? dit : dte;
+            const romAnn = isFinite(rom) && isFinite(annPeriod) && annPeriod > 0 ? rom * (365 / annPeriod) : NaN;
             /* ROI de acciones cerradas: P&L realizado / capital invertido (BEP × qty). Anualizado con el DIT real. */
             const stockBasis = Math.abs(n(effBep(p)) * n(p.qty));
             const stockRoi = !isOpt && p.closed && stockBasis ? result / stockBasis : NaN;
@@ -1831,30 +2198,38 @@ function MovimientosView({ positions, reopenPos }) {
                   <div onClick={(ev) => ev.stopPropagation()} style={{ marginTop: 8, background: T.tile, borderRadius: 16, padding: "12px 12px" }}>
                     {isOpt ? (
                       <>
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 10 }}>
+                        {/* cabecera al estilo Comparador: prima grande a la izquierda, Annualized ROI grande a la derecha */}
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
                           <div>
-                            <div style={{ fontSize: 22, fontWeight: 800, color: T.ink, letterSpacing: -0.4 }}>{signMoney(primaSum)}</div>
-                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>Prima acumulada</div>
+                            <div style={{ fontSize: 24, fontWeight: 800, color: primaSum >= 0 ? T.ink : T.red, letterSpacing: -0.5 }}>{signMoney(primaSum)}</div>
+                            <div style={{ fontSize: 11, color: T.sub, fontWeight: 500 }}>Prima acumulada</div>
                           </div>
                           <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 22, fontWeight: 800, color: isFinite(rom) && rom >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{fmtPct2(rom)}</div>
-                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>ROM (prima/riesgo)</div>
+                            <div style={{ fontSize: 24, fontWeight: 800, color: isFinite(romAnn) && romAnn >= 0 ? T.green : T.red, letterSpacing: -0.5 }}>{fmtPct2(romAnn)}</div>
+                            <div style={{ fontSize: 11, color: T.sub, fontWeight: 500 }}>Annualized ROI</div>
                           </div>
                         </div>
-                        <div style={{ background: T.card, borderRadius: 14, padding: "10px 12px", display: "flex", justifyContent: "space-around", gap: 10, marginBottom: 10 }}>
-                          <div style={{ textAlign: "center" }}>
-                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>Riesgo</div>
-                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money(riesgo)}</div>
-                          </div>
-                          <div style={{ textAlign: "center" }}>
-                            <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>BEP</div>
-                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink }}>${money2(effBep(p))}</div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+                          <MiniStat label="ROI (prima/riesgo)" value={fmtPct2(rom)} color={isFinite(rom) && rom >= 0 ? T.green : T.red} size={18} />
+                          <div style={{ display: "flex", gap: 14, background: T.card, borderRadius: 12, padding: "8px 12px", flexShrink: 0 }}>
+                            <div style={{ textAlign: "center" }}>
+                              <div style={{ fontSize: 10, color: T.sub, fontWeight: 500 }}>Riesgo</div>
+                              <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>${money(riesgo)}</div>
+                            </div>
+                            <div style={{ textAlign: "center" }}>
+                              <div style={{ fontSize: 10, color: T.sub, fontWeight: 500 }}>BEP</div>
+                              <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>${money2(effBep(p))}</div>
+                            </div>
                           </div>
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: (chain.length > 0 || p.closed) ? 10 : 0 }}>
-                          <Tile label="DTE" value={isFinite(dte) ? dte + "d" : "—"} />
-                          <Tile label="DIT" value={isFinite(dit) ? dit + "d" : "—"} />
-                          <Tile label="IVR apertura" value={p.ivr || "—"} />
+                        {/* fila alineada de 4 tiles: IVR · Strike · DTE · DIT */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: (natOf(p) === "CRED" || chain.length > 0 || p.closed) ? 10 : 0 }}>
+                          {[["IVR", p.ivr || "—"], ["Strike", n(p.strike) ? "$" + strikeStr(p.strike) : "—"], ["DTE", isFinite(dte) ? dte + "d" : "—"], ["DIT", isFinite(dit) ? dit + "d" : "—"]].map(([lbl, val]) => (
+                            <div key={lbl} style={{ background: T.card, borderRadius: 14, padding: "10px 4px", textAlign: "center", minWidth: 0 }}>
+                              <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{val}</div>
+                              <div style={{ fontSize: 10, color: T.sub, marginTop: 2, fontWeight: 500 }}>{lbl}</div>
+                            </div>
+                          ))}
                         </div>
                       </>
                     ) : (
@@ -1889,58 +2264,10 @@ function MovimientosView({ positions, reopenPos }) {
                         </div>
                       </>
                     )}
-                    {isOpt && (chain.length > 0 || p.closed) && (
+                    {isOpt && (natOf(p) === "CRED" || chain.length > 0 || p.closed) && (
                       <div>
                         <div style={{ fontSize: 10, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>{chain.length > 0 ? "Cadena de rolls" : "Patas de la operación"}</div>
-                        {(() => {
-                          const rightLabel = p.right === "C" ? "CALL" : "PUT";
-                          const shortSide = natOf(p) === "CRED"; // corta: apertura = VENTA, recompra = COMPRA
-                          const q = n(p.qty);
-                          /* filas de patas: tabla más grande, deslizable en horizontal (minWidth fuerza scroll en móvil) */
-                          const LegRow = ({ date, action, strike, expiry, perShare, amount, fee, ivr, ret, isBuy, isExp }) => {
-                            const legDays = daysBetween(date, expiry);
-                            return (
-                            <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
-                              <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(date)}</span>
-                              <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{action} {rightLabel}</span>
-                              <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{strikeStr(strike)}{p.right}</span>
-                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, whiteSpace: "nowrap" }}>{expiry ? shortDate(expiry) : "—"}</span>
-                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(legDays) ? legDays + "d" : "—"}</span>
-                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{ivr || "—"}</span>
-                              <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{fee ? "$" + money2(fee) : "—"}</span>
-                              <span style={{ fontSize: 12.5, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(perShare))}</span>
-                              <span style={{ fontSize: 13, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(amount))}</span>
-                              <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>
-                            </div>
-                          );};
-                          const rows = [];
-                          const openAmt = openingPrimaPerShare(p) * q;
-                          rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStrike(p)} expiry={openingExpiry(p)} perShare={openingPrimaPerShare(p)} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} ret={n(openingStrike(p)) ? openingPrimaPerShare(p) / n(openingStrike(p)) : NaN} isBuy={!shortSide} />);
-                          chain.forEach((r, idx) => {
-                            const buyAmt = n(r.buybackCost) * q, sellAmt = n(r.newCredit) * q;
-                            rows.push(<LegRow key={"b" + idx} date={r.date} action={shortSide ? "COMPRA" : "VENTA"} strike={r.prevStrike} expiry={r.prevExpiry} perShare={n(r.buybackCost)} amount={buyAmt} fee={n(r.comision)} isBuy={shortSide} />);
-                            rows.push(<LegRow key={"s" + idx} date={r.date} action={shortSide ? "VENTA" : "COMPRA"} strike={strikeAfterRoll(p, idx)} expiry={expiryAfterRoll(p, idx)} perShare={n(r.newCredit)} amount={sellAmt} ivr={r.ivr} ret={n(strikeAfterRoll(p, idx)) ? n(r.newCredit) / n(strikeAfterRoll(p, idx)) : NaN} isBuy={!shortSide} />);
-                            if (r.note) rows.push(<div key={"n" + idx} style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 6px 4px", lineHeight: 1.4 }}>💬 {r.note}</div>);
-                          });
-                          if (p.closed) {
-                            const closeAmt = n(p.closePrice) * q;
-                            const isExp = n(p.closePrice) === 0;
-                            rows.push(<LegRow key="close" date={p.closeDate} action={isExp ? "EXPIRA" : (shortSide ? "COMPRA" : "VENTA")} strike={p.strike} expiry={p.expiry} perShare={n(p.closePrice)} amount={closeAmt} fee={n(p.closeComision)} isBuy={shortSide && !isExp} isExp={isExp} />);
-                            if (p.closeNote) rows.push(<div key="cn" style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 4px 4px", lineHeight: 1.4 }}>💬 {p.closeNote}</div>);
-                          }
-                          return (
-                            <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", margin: "0 -12px", padding: "0 12px" }}>
-                              <div style={{ minWidth: 732 }}>
-                                <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
-                                  {["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", "%Strike"].map((h, i) => (
-                                    <span key={h} style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: i >= 4 ? "right" : "left" }}>{h}</span>
-                                  ))}
-                                </div>
-                                {rows}
-                              </div>
-                            </div>
-                          );
-                        })()}
+                        <RollChainTable p={p} />
                       </div>
                     )}
                   </div>
@@ -2363,7 +2690,7 @@ function App() {
   const [brokerModalOpen, setBrokerModalOpen] = useState(false);
   const [newBrokerName, setNewBrokerName] = useState("");
   const [removeTarget, setRemoveTarget] = useState({});
-  const [view, setView] = useState(() => { try { const v = localStorage.getItem(KEY_VIEW); return v === "comparador" || v === "movimientos" || v === "ajustes" ? v : "bloques"; } catch (e) { return "bloques"; } });
+  const [view, setView] = useState(() => { try { const v = localStorage.getItem(KEY_VIEW); return v === "comparador" || v === "movimientos" || v === "vencimientos" || v === "ajustes" ? v : "bloques"; } catch (e) { return "bloques"; } });
   const selectView = (v) => { setView(v); try { localStorage.setItem(KEY_VIEW, v); } catch (e) {} };
   const [trades, setTrades] = useState([]);
   const [basis, setBasis] = useState(() => { try { const v = localStorage.getItem(KEY_BASIS); return BASIS_KEYS.includes(v) ? v : "annRom"; } catch (e) { return "annRom"; } });
@@ -2384,6 +2711,15 @@ function App() {
     pnlModo: p.pnlModo != null ? p.pnlModo : "AUTO",
     prima: p.prima != null ? p.prima : "",
     ...p,
+    /* migración de nombre: "Short Call" (nombre antiguo) pasa a llamarse "Covered Call" en todos los
+       registros ya guardados, para que el título se vea correcto en toda la app sin perder el vínculo */
+    tipo: (p.tipo || "").trim().toLowerCase() === "short call" ? "Covered Call" : p.tipo,
+    /* migración P&L: las opciones cortas creadas con el antiguo default (Manual, 0) pasan a Auto para
+       que muestren el P&L simulado Spot − BEP; un P&L manual distinto de 0 se respeta. PMCC se deja Manual. */
+    pnlModo: !isPMCC(p) && (p.nat === "CRED" || inferNat(p) === "CRED") && p.pnlModo === "MANUAL" && (!p.pnl || n(p.pnl) === 0) ? "AUTO" : p.pnlModo,
+    /* toda call corta es covered call por definición del framework: covered=true siempre (riesgo 0 en su bloque).
+       El PMCC es la excepción: su short call NO cubre acciones (cubre la long call), así que covered=false. */
+    covered: !isPMCC(p) && (p.nat === "CRED" || inferNat(p) === "CRED") && p.right === "C" ? true : p.covered,
     nat: p.nat || inferNat(p),
   }));
   useEffect(() => {
@@ -2660,7 +2996,9 @@ function App() {
   const elNlv = nlv !== 0 ? el / nlv : NaN;
   const elMrgn = margin !== 0 ? el / margin : NaN;
   const totalPnl = useMemo(() => active.reduce((s, p) => s + effPnl(p), 0), [active]);
-  const totalRiesgo = useMemo(() => active.reduce((s, p) => s + capDesplegado(p), 0), [active]);
+  /* riesgo total de la cuenta: excluye B0 (liquidez) — B0 sigue contando en la distribución (donut,
+     exposición, tarjeta de bloque) para ver su tamaño, pero no infla el agregado de riesgo */
+  const totalRiesgo = useMemo(() => active.filter((p) => p.block !== 0).reduce((s, p) => s + capDesplegado(p), 0), [active]);
 
   const setAccField = (brk, k) => (v) => setAccounts((a) => ({ ...a, [brk]: { ...a[brk], [k]: v } }));
   const setPos = (id, k, v) => setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, [k]: v } : p)));
@@ -2672,6 +3010,98 @@ function App() {
     const today = new Date().toISOString().slice(0, 10);
     setPositions((ps) => [...ps, { id, block: blockId, broker: b, tkr: "", tipo: "", nat: defNat, strike: "", right: "P", expiry: "", qty: "", bep: "", prima: "", comision: "", ivr: "", last: "", mktValue: "", riesgo: "", factor: "1", margen: "", margenPct: "100", margenModo: "PCT", mktModo: "AUTO", pnlModo: "AUTO", pnl: "", entryDate: today, rollChain: [], closed: false, closeDate: "", closePrice: "", closeComision: "", closeNote: "" }]);
     setEditSet((s) => new Set(s).add(id));
+  };
+  /* ===== asistente "Nueva posición" (botón + flotante) ===== */
+  const [sheetPosId, setSheetPosId] = useState(null);
+  const [sheetConfirmDel, setSheetConfirmDel] = useState(false);
+  const [pendingAction, setPendingAction] = useState(null); // { id, action: 'roll'|'close' }
+  const sheetPos = sheetPosId ? positions.find((x) => x.id === sheetPosId) : null;
+  const openSheet = (p) => { setSheetPosId(p.id); setSheetConfirmDel(false); };
+  const sheetDo = (action) => {
+    if (!sheetPos) return;
+    if (action === "edit") { setEditSet((s) => new Set(s).add(sheetPos.id)); }
+    if (action === "roll" || action === "close") { setPendingAction({ id: sheetPos.id, action }); } /* roll/cierre: hoja propia, sin abrir el menú de edición */
+    if (action === "reopen") { reopenPos(sheetPos.id); }
+    setSheetPosId(null);
+  };
+  const [wizOpen, setWizOpen] = useState(false);
+  const [wizStep, setWizStep] = useState(1);
+  const [wizBlock, setWizBlock] = useState(null);
+  const [wizNat, setWizNat] = useState(null);
+  const [wizStrat, setWizStrat] = useState("");
+  const [wizForm, setWizForm] = useState({});
+  const openWizard = () => {
+    setWizBlock(null); setWizNat(null); setWizStrat(""); setWizStep(1);
+    setWizForm({ broker: broker === "Todos" ? (brokers[0] || "IBKR") : broker, entryDate: new Date().toISOString().slice(0, 10), covered: "SI", collarRisk: "NO" });
+    setWizOpen(true);
+  };
+  const wizF = (k) => (v) => setWizForm((f) => ({ ...f, [k]: v }));
+  const wizSave = () => {
+    const f = wizForm;
+    const nat = wizNat;
+    /* Long Call: débito de una sola pata (comprar call). BEP = Strike + Prima (auto), y su riesgo es
+       SIEMPRE el 100% de la prima pagada — sin factor de plausible ni coste manual. */
+    const isLongCall = nat === "DEF" && wizStrat === "Long Call";
+    /* PMCC: la pata CORTA es la posición principal (nat=CRED, right=C) y se rola/registra como short call.
+       La pata LARGA se guarda en p.long. BEP = prima long − prima short; riesgo = ese débito neto × qty. */
+    const isPMCCw = wizStrat === "PMCC";
+    const effNat = isPMCCw ? "CRED" : nat;
+    const right = effNat === "CRED" ? ((wizStrat || "").toLowerCase().includes("call") || isPMCCw ? "C" : "P") : (isLongCall ? "C" : (f.right || "P"));
+    const cts = parseFloat(String(f.contratos || "").replace(",", "."));
+    const qty = (effNat === "CRED" || nat === "DEF") && isFinite(cts) ? String(Math.round(cts * 100)) : (f.qty || "");
+    const plaus = parseFloat(String(f.plausible || "").replace(",", "."));
+    const factor = (isLongCall || isPMCCw) ? "1" : (isFinite(plaus) ? String(plaus / 100) : "1");
+    /* prima pagada por acción (positiva) → coste total = prima × contratos × 100, que es a la vez el riesgo
+       total y el plausible del Long Call (máx pérdida = prima pagada). */
+    const lcPrimaPS = Math.abs(parseFloat(String(f.prima || "").replace(",", ".")));
+    const lcCost = isLongCall && isFinite(lcPrimaPS) && isFinite(cts) ? String(lcPrimaPS * cts * 100) : "";
+    /* PMCC: prima long pagada y prima short cobrada (ambas positivas). Débito neto = long − short. */
+    const pmLongPS = Math.abs(parseFloat(String(f.lgPrima || "").replace(",", ".")));
+    const pmShortPS = Math.abs(parseFloat(String(f.prima || "").replace(",", ".")));
+    const pmNetDebit = (isFinite(pmLongPS) ? pmLongPS : 0) - (isFinite(pmShortPS) ? pmShortPS : 0);
+    const pmRisk = isPMCCw && isFinite(cts) ? String(Math.max(0, pmNetDebit) * cts * 100) : "";
+    const p = {
+      id: newId(), block: wizBlock, broker: f.broker, tkr: (f.tkr || "").toUpperCase().trim(),
+      tipo: wizStrat, nat: effNat, right,
+      strike: f.strike || "", expiry: f.expiry || "", qty,
+      bep: (isLongCall || isPMCCw) ? "" : (f.bep || ""), prima: isLongCall ? (isFinite(lcPrimaPS) ? String(lcPrimaPS) : "") : isPMCCw ? (isFinite(pmShortPS) ? String(pmShortPS) : "") : (f.prima || ""), comision: f.comision || "", ivr: f.ivr || "",
+      last: "", mktValue: "", riesgo: isLongCall ? lcCost : isPMCCw ? pmRisk : (nat === "DEF" ? (f.margen || "") : ""),
+      factor, margen: isLongCall ? lcCost : isPMCCw ? pmRisk : (f.margen || ""),
+      margenPct: effNat === "ACC" || effNat === "CASH" ? (f.margenPct || "") : "100",
+      margenModo: effNat === "ACC" || effNat === "CASH" ? "PCT" : "VALOR",
+      mktModo: "AUTO", pnlModo: isPMCCw ? "MANUAL" : (nat === "ACC" || nat === "CRED" ? "AUTO" : "MANUAL"), pnl: "0",
+      entryDate: f.entryDate || "", rollChain: [],
+      covered: effNat === "CRED" && right === "C" && !isPMCCw,
+      coveredBy: ((effNat === "CRED" && right === "C" && !isPMCCw) || nat === "COLLAR") ? (f.coveredStockId || "") : "",
+      long: isPMCCw ? { strike: f.lgStrike || "", expiry: f.lgExpiry || "", prima: isFinite(pmLongPS) ? String(pmLongPS) : "", comision: f.lgComision || "" } : undefined,
+      closed: false, closeDate: "", closePrice: "", closeComision: "", closeNote: "", closeLongPrice: "", closeLongComision: "",
+    };
+    setPositions((ps) => {
+      /* collar vinculado: fija plausBep en la acción de B1 — "0" si el collar no deja riesgo (plausible 0),
+         o el BEP protegido introducido, que sustituye al BEP como base del plausible de la acción */
+      if (nat === "COLLAR" && p.coveredBy) {
+        const pb = f.collarRisk === "SI" ? (f.collarBep || "") : "0";
+        return [...ps.map((x) => (x.id === p.coveredBy ? { ...x, plausBep: pb } : x)), p];
+      }
+      /* wheel: al abrir una covered call, la prima cobrada rebaja el BEP de las acciones subyacentes
+         (mismo broker + ticker, abiertas), igual que ya hace rollPos con el neto de cada roll */
+      if (p.covered && n(p.prima) && n(p.qty)) {
+        const tkrKey = p.tkr;
+        const stockMatches = p.coveredBy
+          ? ps.filter((x) => x.id === p.coveredBy && !x.closed)
+          : ps.filter((x) => natOf(x) === "ACC" && !x.closed && x.broker === p.broker && (x.tkr || "").trim().toUpperCase() === tkrKey);
+        const stockQtyTotal = stockMatches.reduce((s, x) => s + n(x.qty), 0);
+        if (stockQtyTotal) {
+          const perShareAdj = (n(p.prima) * n(p.qty)) / stockQtyTotal;
+          const ids = new Set(stockMatches.map((x) => x.id));
+          return [...ps.map((x) => (ids.has(x.id) ? { ...x, bep: String(n(x.bep) - perShareAdj) } : x)), p];
+        }
+      }
+      return [...ps, p];
+    });
+    setWizOpen(false);
+    setBroker(f.broker);
+    if (view !== "bloques") selectView("bloques");
   };
   const delPos = (id) => setPositions((ps) => ps.filter((p) => p.id !== id));
   /* roll de opción corta: se hace directamente desde la posición del bloque. Se piden los dos números reales
@@ -2689,11 +3119,13 @@ function App() {
     setPositions((ps) => {
       const target = ps.find((p) => p.id === id);
       const netPerShare = n(newCredit) - n(buybackCost);
-      const isCoveredCall = !!target && natOf(target) === "CRED" && target.right === "C";
+      const isCoveredCall = !!target && natOf(target) === "CRED" && target.right === "C" && !isPMCC(target);
       const totalCash = isCoveredCall ? netPerShare * n(target.qty) : 0;
       const tkrKey = target ? (target.tkr || "").trim().toUpperCase() : "";
       const stockMatches = isCoveredCall && totalCash
-        ? ps.filter((p) => p.id !== id && natOf(p) === "ACC" && !p.closed && p.broker === target.broker && (p.tkr || "").trim().toUpperCase() === tkrKey)
+        ? (target.coveredBy
+            ? ps.filter((p) => p.id === target.coveredBy && !p.closed)
+            : ps.filter((p) => p.id !== id && natOf(p) === "ACC" && !p.closed && p.broker === target.broker && (p.tkr || "").trim().toUpperCase() === tkrKey))
         : [];
       const stockQtyTotal = stockMatches.reduce((s, p) => s + n(p.qty), 0);
       const perShareAdj = stockQtyTotal ? totalCash / stockQtyTotal : 0;
@@ -2713,8 +3145,8 @@ function App() {
   /* cierre de posición: acciones (o ETF/collar) solo necesitan precio de venta → resultado realizado va a MTM;
      opciones necesitan precio de recompra → cash de prima va a Primas. En ambos casos la posición se marca
      "closed" pero NO se borra (así conserva su historial para Movimientos) y deja de contar en riesgo/exposición. */
-  const closePos = (id, { date, price, comision, note }) => {
-    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision, closeNote: note || "" } : p)));
+  const closePos = (id, { date, price, comision, note, longPrice, longComision }) => {
+    setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision, closeNote: note || "", closeLongPrice: longPrice != null ? longPrice : "", closeLongComision: longComision != null ? longComision : "" } : p)));
   };
   const reopenPos = (id) => setPositions((ps) => ps.map((p) => (p.id === id ? { ...p, closed: false } : p)));
   const clearAll = () => {
@@ -2821,6 +3253,30 @@ function App() {
     });
   }, [active, mktvl, nlv, margin, isDark]);
 
+  /* mapa id-de-acción → lista de covered call(s) abiertas que la cubren (ordenadas por vencimiento):
+     alimenta el banner "COVERED" en la fila de la acción en B1, una línea por call. Usa el enlace
+     explícito coveredBy si existe; si no, el heurístico broker+ticker (covered calls antiguas sin enlace). */
+  const coveredMap = useMemo(() => {
+    const m = {};
+    positions.forEach((cc) => {
+      if (cc.closed) return;
+      const isCC = natOf(cc) === "CRED" && cc.right === "C" && cc.covered;
+      const isCollar = natOf(cc) === "COLLAR" && cc.coveredBy; /* collar solo si está vinculado explícitamente */
+      if (!isCC && !isCollar) return;
+      const cts = n(cc.qty) / 100;
+      const ctsStr = cts ? (Number.isInteger(cts) ? cts : cts.toFixed(1)) + (cts === 1 ? " contrato" : " contratos") : "";
+      const det = isCC ? strikeStr(cc.strike) + "C" : (n(cc.strike) ? strikeStr(cc.strike) + (cc.right || "") : "");
+      const label = [det, cc.expiry ? ibkrDate(cc.expiry) : "", ctsStr].filter(Boolean).join(" · ") || (isCollar ? "activo" : "");
+      const k = (cc.tkr || "").trim().toUpperCase();
+      const ids = cc.coveredBy
+        ? [cc.coveredBy]
+        : positions.filter((s) => natOf(s) === "ACC" && !s.closed && s.broker === cc.broker && (s.tkr || "").trim().toUpperCase() === k).map((s) => s.id);
+      ids.forEach((id) => { (m[id] = m[id] || []).push({ label, kind: isCollar ? "collar" : "cc", expiry: cc.expiry || "9999-12-31" }); });
+    });
+    Object.keys(m).forEach((id) => { m[id] = m[id].sort((a, b) => (a.expiry < b.expiry ? -1 : 1)).map((x) => ({ label: x.label, kind: x.kind })); });
+    return m;
+  }, [positions]);
+
   const vencimientosRows = useMemo(() => {
     const map = {};
     active.forEach((p) => {
@@ -2836,10 +3292,12 @@ function App() {
       const groups = {};
       r.items.forEach((p) => {
         const key = p.tkr + "|" + p.block + "|" + (p.right || "") + "|" + (p.strike || "");
-        if (!groups[key]) groups[key] = { tkr: p.tkr, block: p.block, right: p.right, strike: p.strike, qty: 0, bepW: 0, riesgo: 0 };
+        if (!groups[key]) groups[key] = { tkr: p.tkr, block: p.block, right: p.right, strike: p.strike, qty: 0, bepW: 0, riesgo: 0, last: "", covered: false };
         groups[key].qty += n(p.qty);
         groups[key].bepW += effBep(p) * n(p.qty);
         groups[key].riesgo += capDesplegado(p);
+        if (!groups[key].last && p.last) groups[key].last = p.last;
+        if (p.covered) groups[key].covered = true;
       });
       const detailRows = Object.values(groups).map((g) => {
         const contratos = g.qty / 100;
@@ -2847,7 +3305,7 @@ function App() {
           tkr: g.tkr, block: g.block, right: g.right, strike: g.strike,
           qtyNum: Number.isInteger(contratos) ? contratos : g.qty,
           bep: g.qty ? g.bepW / g.qty : NaN,
-          riesgo: g.riesgo,
+          riesgo: g.riesgo, last: g.last, covered: g.covered,
         };
       }).sort((a, b) => b.riesgo - a.riesgo);
       const dte = Math.round((new Date(r.expiry + "T00:00:00") - today) / 86400000);
@@ -2912,9 +3370,9 @@ function App() {
     });
     lines.push("");
 
-    const totalRiesgoAll = positions.reduce((s, p) => s + capDesplegado(p), 0);
+    const totalRiesgoAll = positions.filter((p) => p.block !== 0).reduce((s, p) => s + capDesplegado(p), 0);
     const totalPnlAll = positions.reduce((s, p) => s + effPnl(p), 0);
-    lines.push(`TOTAL RIESGO: $${money(totalRiesgoAll)} · P&L TOTAL: ${signMoney(totalPnlAll)}`);
+    lines.push(`TOTAL RIESGO (sin B0): $${money(totalRiesgoAll)} · P&L TOTAL: ${signMoney(totalPnlAll)}`);
     return lines.join("\n");
   };
   const openExport = () => { setExportText(buildExportText()); setExportCopied(false); setExportOpen(true); };
@@ -2950,8 +3408,8 @@ function App() {
       mktvl: mktvlAll, cash: cashAll, margin: marginAll, nlv: nlvAll, el: elAll,
       elNlv: nlvAll ? elAll / nlvAll : NaN, elMrgn: marginAll ? elAll / marginAll : NaN,
       leverage: nlvAll ? mktvlAll / nlvAll : NaN,
-      totalRiesgo: pos.reduce((s, p) => s + capDesplegado(p), 0),
-      totalPlausible: pos.reduce((s, p) => s + plausibleOf(p), 0),
+      totalRiesgo: pos.filter((p) => p.block !== 0).reduce((s, p) => s + capDesplegado(p), 0),
+      totalPlausible: pos.filter((p) => p.block !== 0).reduce((s, p) => s + plausibleOf(p), 0),
       totalPnl: pos.reduce((s, p) => s + effPnl(p), 0),
       blocks, tickers,
     };
@@ -2998,11 +3456,10 @@ function App() {
 
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14, gap: 8 }}>
           <div>
-            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : view === "movimientos" ? "Movimientos" : view === "ajustes" ? "Ajustes" : "Comparador"}</div>
-            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : view === "movimientos" ? "Primas y resultado realizado (MTM)" : view === "ajustes" ? "Brokers, backup, claves y apariencia" : "Sizing e impacto de margen"}</div>
+            <div style={{ fontSize: 30, fontWeight: 800, letterSpacing: -0.8 }}>{view === "bloques" ? "Portfolio" : view === "movimientos" ? "Movimientos" : view === "vencimientos" ? "Vencimientos" : view === "ajustes" ? "Ajustes" : "Comparador"}</div>
+            <div style={{ fontSize: 15, color: T.sub, fontWeight: 500 }}>{view === "bloques" ? "Composición de cartera en tiempo real" : view === "movimientos" ? "Primas y resultado realizado (MTM)" : view === "vencimientos" ? "Opciones por fecha y riesgo de asignación" : view === "ajustes" ? "Brokers, backup, claves y apariencia" : "Sizing e impacto de margen"}</div>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: "wrap", justifyContent: "flex-end" }}>
-            {view === "bloques" && <button onClick={onRefreshClick} disabled={refreshing} style={{ background: T.card, border: "none", borderRadius: 14, padding: "8px 14px", fontSize: 13, fontWeight: 700, color: T.sub, cursor: "pointer", boxShadow: T.shadow }}>{refreshing ? "…" : "🔄 Precios"}</button>}
           </div>
         </div>
 
@@ -3126,28 +3583,34 @@ function App() {
         {/* CONTENIDO DE LA PESTAÑA */}
         {isBlockTab ? (
           <BlockCard blk={blk} positions={blockPositions} nlv={nlv} showPnl={showPnl} togglePnl={togglePnl} brokers={brokers}
-            editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} rollPos={rollPos} closePos={closePos} reopenPos={reopenPos} />
+            editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} rollPos={rollPos} closePos={closePos} reopenPos={reopenPos}
+            onOpenSheet={openSheet} pendingAction={pendingAction} clearPending={() => setPendingAction(null)} coveredMap={coveredMap} />
         ) : activeTab === "rendimiento" ? (
           <RendimientoCard snapshots={snapshots} flows={flows} onSave={saveSnapshot} onDelete={deleteSnapshot} />
         ) : activeTab === "aportaciones" ? (
           <AportacionesCard flows={flows} setFlows={setFlows} brokers={brokers} />
-        ) : activeTab === "vencimientos" ? (
-          <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />
         ) : (
           <ExposureCard rows={exposureRows} onOpen={setInfo} showPnl={showPnl} togglePnl={togglePnl} />
         )}
 
-        {/* DISTRIBUCIÓN — debajo del contenido del bloque (no aplica en Rendimiento, Aportaciones ni Vencimientos) */}
-        {activeTab !== "rendimiento" && activeTab !== "aportaciones" && activeTab !== "vencimientos" && (
+        {/* DISTRIBUCIÓN — debajo del contenido del bloque (no aplica en Rendimiento ni Aportaciones) */}
+        {activeTab !== "rendimiento" && activeTab !== "aportaciones" && (
           <ChartCard scope={chartScope} setScope={setScopeAndReset} scopeOptions={scopeOptions} slices={chartData.slices} total={chartData.total} denomPct={chartData.denomPct} denomLabel={chartData.denomLabel} selected={selectedSlice} onSelect={setSelectedSlice} />
         )}
 
         </>)}
 
+        {view === "vencimientos" && <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />}
+
         {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} />}
 
         {view === "ajustes" && (
           <div style={{ display: "grid", gap: 16 }}>
+            <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>Precios</div>
+              <button onClick={onRefreshClick} disabled={refreshing} style={{ width: "100%", background: T.tile, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>{refreshing ? "Actualizando…" : "🔄 Actualizar precios"}</button>
+            </div>
+
             <div style={{ background: T.card, borderRadius: 24, padding: 18, boxShadow: T.shadow }}>
               <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>Apariencia</div>
               <button onClick={toggleDark} style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", background: T.tile, border: "none", borderRadius: 14, padding: "13px 16px", fontSize: 14.5, fontWeight: 700, color: T.ink, cursor: "pointer" }}>
@@ -3264,10 +3727,13 @@ function App() {
                     {count > 0 && brokers.length > 1 && (
                       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9 }}>
                         <span style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Mover a</span>
-                        <select value={dest} onChange={(e) => setRemoveTarget((rt) => ({ ...rt, [b]: e.target.value }))}
-                          style={{ flex: 1, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 10, color: T.ink, fontSize: 13.5, fontWeight: 700, padding: "8px 10px", outline: "none", appearance: "none", WebkitAppearance: "none" }}>
-                          {others.map((o) => <option key={o} value={o}>{o}</option>)}
-                        </select>
+                        <div style={{ flex: 1, position: "relative" }}>
+                          <select value={dest} onChange={(e) => setRemoveTarget((rt) => ({ ...rt, [b]: e.target.value }))}
+                            style={{ width: "100%", boxSizing: "border-box", background: T.card, border: "none", borderRadius: 10, color: T.ink, fontSize: 13.5, fontWeight: 700, padding: "9px 28px 9px 10px", outline: "none", appearance: "none", WebkitAppearance: "none" }}>
+                            {others.map((o) => <option key={o} value={o}>{o}</option>)}
+                          </select>
+                          <span style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: T.sub, fontSize: 12, pointerEvents: "none" }}>▾</span>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -3350,17 +3816,424 @@ function App() {
       )}
 
       {/* NAV INFERIOR FLOTANTE */}
-      <div style={{ position: "fixed", left: 0, right: 0, bottom: 18, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
-        <div style={{ display: "flex", gap: 4, background: "rgba(28,25,20,0.92)", backdropFilter: "blur(14px)", WebkitBackdropFilter: "blur(14px)", borderRadius: 30, padding: "8px 8px", boxShadow: "0 10px 30px rgba(0,0,0,0.35)", pointerEvents: "auto" }}>
-          {[["bloques", "📊", "Portfolio"], ["movimientos", "🔁", "Movimientos"], ["comparador", "⚖️", "Comparador"], ["ajustes", "⚙️", "Ajustes"]].map(([id, icon, label]) => (
-            <button key={id} onClick={() => selectView(id)} style={{
-              display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
-              background: view === id ? "rgba(255,255,255,0.14)" : "transparent", borderRadius: 22, padding: "8px 16px", minWidth: 76,
-            }}>
-              <span style={{ fontSize: 19 }}>{icon}</span>
-              <span style={{ fontSize: 10.5, fontWeight: 700, color: view === id ? T.purple : "#fff" }}>{label}</span>
-            </button>
-          ))}
+      {/* ACTION SHEET DE POSICIÓN */}
+      {sheetPos && (() => {
+        const p = sheetPos;
+        const nat = natOf(p);
+        const isOpt = !!(p.strike || p.expiry) && nat !== "ACC" && nat !== "CASH";
+        const canRollP = !p.closed && isOpt && nat === "CRED";
+        const canCloseP = !p.closed && (nat === "ACC" || nat === "COLLAR" || isOpt);
+        const dte = p.expiry ? daysBetween(new Date().toISOString().slice(0, 10), p.expiry) : NaN;
+        const contratos = n(p.qty) / 100;
+        const blk = BLOCKS.find((b) => b.id === p.block);
+        const ActionBtn = ({ icon, label, sub, color, onClick, danger }) => (
+          <button onClick={onClick} style={{ display: "flex", alignItems: "center", gap: 12, width: "100%", background: danger ? T.tileRed : T.tile, border: "none", borderRadius: 14, padding: "14px 14px", cursor: "pointer", textAlign: "left" }}>
+            <span style={{ fontSize: 20, width: 28, textAlign: "center" }}>{icon}</span>
+            <span>
+              <span style={{ display: "block", fontSize: 14.5, fontWeight: 800, color: danger ? T.red : (color || T.ink) }}>{label}</span>
+              {sub && <span style={{ display: "block", fontSize: 11, fontWeight: 600, color: T.sub, marginTop: 1 }}>{sub}</span>}
+            </span>
+          </button>
+        );
+        return (
+          <div onClick={() => setSheetPosId(null)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 60 }}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: "26px 26px 0 0", padding: "18px 18px 26px", width: "100%", maxWidth: 560, maxHeight: "80vh", overflowY: "auto", boxShadow: "0 -10px 40px rgba(0,0,0,0.35)" }}>
+              <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14 }}>
+                <div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 20, fontWeight: 800, color: T.ink }}>{p.tkr || "Sin ticker"}</span>
+                    {p.tipo && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, background: T.tile, borderRadius: 7, padding: "3px 7px" }}>{p.tipo}</span>}
+                    {blk && <span style={{ fontSize: 10.5, fontWeight: 800, color: "#fff", background: blk.badge, borderRadius: 7, padding: "3px 7px" }}>B{p.block}</span>}
+                    {p.closed && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, background: T.tile, borderRadius: 7, padding: "3px 7px" }}>Cerrada</span>}
+                  </div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: T.sub, marginTop: 4 }}>
+                    {p.broker}{isOpt && p.strike ? ` · ${p.strike}${p.right}` : ""}{p.expiry ? ` · vence ${p.expiry}` : ""}{isFinite(dte) && dte >= 0 && !p.closed ? ` (${dte}d)` : ""}
+                  </div>
+                </div>
+                <button onClick={() => setSheetPosId(null)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 16 }}>
+                <div style={{ background: T.tile, borderRadius: 12, padding: "10px 10px" }}>
+                  <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>{isOpt ? "Contratos" : "Cantidad"}</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>{isOpt ? (Number.isInteger(contratos) ? contratos : contratos.toFixed(1)) : (p.qty || "—")}</div>
+                </div>
+                <div style={{ background: T.tile, borderRadius: 12, padding: "10px 10px" }}>
+                  <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>BEP</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>{isFinite(effBep(p)) && effBep(p) !== 0 ? effBep(p).toFixed(2) : (p.bep || "—")}</div>
+                </div>
+                <div style={{ background: T.tile, borderRadius: 12, padding: "10px 10px" }}>
+                  <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>{nat === "CRED" ? "Prima acum." : "Riesgo"}</div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: nat === "CRED" ? T.green : T.ink, fontVariantNumeric: "tabular-nums" }}>{nat === "CRED" && n(p.prima) ? "+$" + money2(n(p.prima) * n(p.qty)) : "$" + money2(capDesplegado(p))}</div>
+                </div>
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {!p.closed && <ActionBtn icon="✎" label="Editar" sub="Modificar cualquier campo de la posición" onClick={() => sheetDo("edit")} />}
+                {canRollP && <ActionBtn icon="🔄" label="Rolar" sub={"Recompra + nueva venta · " + (p.rollChain || []).length + " roll" + ((p.rollChain || []).length === 1 ? "" : "s") + " hasta ahora"} color={T.purple} onClick={() => sheetDo("roll")} />}
+                {canCloseP && <ActionBtn icon="✕" label="Cerrar posición" sub="Registra el cierre con fecha, precio y comisión" onClick={() => sheetDo("close")} />}
+                {p.closed && <ActionBtn icon="↩" label="Reabrir" sub="Deshace el cierre y vuelve a activa" onClick={() => sheetDo("reopen")} />}
+                {p.closed && <ActionBtn icon="✎" label="Editar" sub="Modificar campos de la posición cerrada" onClick={() => sheetDo("edit")} />}
+                <ActionBtn icon="🗑" danger label={sheetConfirmDel ? "¿Seguro? Se borra del todo" : "Eliminar"} sub={sheetConfirmDel ? "Esta acción no se puede deshacer" : "Borra la posición y su historial de rolls"} onClick={() => { if (!sheetConfirmDel) { setSheetConfirmDel(true); return; } delPos(p.id); setSheetPosId(null); }} />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* FAB nueva posición */}
+      {view === "bloques" && !wizOpen && (
+        <button onClick={openWizard} aria-label="Nueva posición" style={{ position: "fixed", right: 16, bottom: 88, zIndex: 41, width: 52, height: 52, border: "none", cursor: "pointer", borderRadius: 26, background: T.green, backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", boxShadow: `0 10px 28px ${hexToRgba(T.green, 0.5)}`, color: "#fff", fontSize: 26, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
+      )}
+
+      {/* ASISTENTE NUEVA POSICIÓN */}
+      {wizOpen && (
+        <div onClick={() => setWizOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 60 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: "26px 26px 0 0", padding: "18px 18px 26px", width: "100%", maxWidth: 560, maxHeight: "86vh", overflowY: "auto", boxShadow: "0 -10px 40px rgba(0,0,0,0.35)" }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {wizStep > 1 && <button onClick={() => setWizStep(wizStep - 1)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 16, color: T.ink, cursor: "pointer" }}>‹</button>}
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>Nueva posición</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub }}>{wizStep === 1 ? "Paso 1 · ¿En qué bloque va?" : wizStep === 2 ? "Paso 2 · Tipo de posición" : "Paso 3 · Detalles"}</div>
+                </div>
+              </div>
+              <button onClick={() => setWizOpen(false)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer" }}>✕</button>
+            </div>
+            <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+              {[1, 2, 3].map((s) => <div key={s} style={{ flex: 1, height: 4, borderRadius: 2, background: s <= wizStep ? T.green : T.tile }} />)}
+            </div>
+
+            {wizStep === 1 && (
+              <div style={{ display: "grid", gap: 10 }}>
+                {BLOCKS.map((b) => (
+                  <button key={b.id} onClick={() => { setWizBlock(b.id); setWizNat(null); setWizStrat(""); setWizStep(2); }} style={{ display: "flex", alignItems: "center", gap: 12, background: b.bg, border: wizBlock === b.id ? `2px solid ${b.color}` : "2px solid transparent", borderRadius: 16, padding: "14px 14px", cursor: "pointer", textAlign: "left" }}>
+                    <div style={{ width: 42, height: 42, borderRadius: 12, background: b.badge, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 800, flexShrink: 0 }}>B{b.id}</div>
+                    <div>
+                      <div style={{ fontSize: 14.5, fontWeight: 800, color: T.ink }}>{b.name} · {b.tag}</div>
+                      <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub }}>{b.desc}</div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {wizStep === 2 && wizBlock !== null && (
+              <div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+                  {natsForBlock(wizBlock).map((nt) => (
+                    <button key={nt.id} onClick={() => { setWizNat(nt.id); setWizStrat(""); }} style={{ background: wizNat === nt.id ? T.dark : T.tile, border: "none", borderRadius: 14, padding: "14px 0", fontSize: 14, fontWeight: 800, color: wizNat === nt.id ? "#fff" : T.ink, cursor: "pointer" }}>
+                      {nt.label}
+                    </button>
+                  ))}
+                </div>
+                {wizNat && (
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Estrategia</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                      {(STRATS[wizBlock] || []).filter((s) => natFromStrat(s) === wizNat).map((s) => (
+                        <button key={s} onClick={() => { setWizStrat(s); setWizStep(3); }} style={{ background: T.tile, border: "none", borderRadius: 20, padding: "10px 16px", fontSize: 13, fontWeight: 700, color: T.ink, cursor: "pointer" }}>{s}</button>
+                      ))}
+                      {(STRATS[wizBlock] || []).filter((s) => natFromStrat(s) === wizNat).length === 0 && (
+                        <button onClick={() => { setWizStrat(wizNat === "ACC" ? "Long Stock" : wizNat === "CASH" ? "Cash" : ""); setWizStep(3); }} style={{ background: T.tile, border: "none", borderRadius: 20, padding: "10px 16px", fontSize: 13, fontWeight: 700, color: T.ink, cursor: "pointer" }}>Continuar</button>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {wizStep === 3 && (
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ display: "flex", gap: 6, alignItems: "center", background: T.tile, borderRadius: 12, padding: "8px 12px" }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub }}>B{wizBlock} · {NATS.find((x) => x.id === wizNat)?.label}{wizStrat ? " · " + wizStrat : ""}</span>
+                </div>
+                {(wizStrat === "Covered Call" || wizStrat === "Collar") ? (() => {
+                  /* covered call y collar: el subyacente se elige de las acciones abiertas de B1 — fija ticker
+                     y broker, y deja el enlace (coveredBy) para el banner en B1 y el riesgo 0 del overlay */
+                  const b1Stocks = positions.filter((x) => x.block === 1 && natOf(x) === "ACC" && !x.closed);
+                  if (b1Stocks.length === 0) return (
+                    <div style={{ display: "grid", gap: 8 }}>
+                      <div style={{ background: T.tileAmber, borderRadius: 12, padding: "9px 12px", fontSize: 12, fontWeight: 700, color: T.gold }}>⚠️ No hay acciones abiertas en B1 que cubrir. Añade primero la acción, o escribe el ticker a mano.</div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                        <label style={{ display: "block", minWidth: 0 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Broker</div>
+                    <Pill options={brokers} value={wizForm.broker} onChange={wizF("broker")} size="sm" />
+                  </label>
+                        <WizInput label="Ticker" value={wizForm.tkr} onChange={wizF("tkr")} upper />
+                      </div>
+                    </div>
+                  );
+                  const optLabel = (s) => s.tkr + " · " + money(n(s.qty)) + " acc · BEP $" + money2(effBep(s)) + " · " + s.broker;
+                  const opts = ["Elige la acción de B1…", ...b1Stocks.map(optLabel)];
+                  const sel = b1Stocks.find((s) => s.id === wizForm.coveredStockId);
+                  return (
+                    <WizSelect label="Acción cubierta (Bloque 1)" value={sel ? optLabel(sel) : opts[0]}
+                      onChange={(lbl) => { const st = b1Stocks.find((s) => optLabel(s) === lbl); if (st) setWizForm((f) => ({ ...f, coveredStockId: st.id, tkr: st.tkr, broker: st.broker })); }}
+                      options={opts} />
+                  );
+                })() : (
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                  <label style={{ display: "block", minWidth: 0 }}>
+                    <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5 }}>Broker</div>
+                    <Pill options={brokers} value={wizForm.broker} onChange={wizF("broker")} size="sm" />
+                  </label>
+                  <WizInput label="Ticker" value={wizForm.tkr} onChange={wizF("tkr")} upper />
+                </div>
+                )}
+                {(wizNat === "CRED") && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Strike" value={wizForm.strike} onChange={wizF("strike")} inputMode="decimal" />
+                      <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
+                      <WizInput label="Prima $/acc · + cobrada − pagada" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" signed />
+                    </div>
+                    {/* covered call: cubierta por acciones — ni consume margen propio ni computa riesgo plausible */}
+                    {wizStrat === "Covered Call" ? (
+                      <div style={{ display: "grid", gridTemplateColumns: "0.6fr 1fr 1.4fr", gap: 10 }}>
+                        <WizInput label="IVR" value={wizForm.ivr} onChange={wizF("ivr")} inputMode="numeric" />
+                        <WizInput label="Comisión" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                        <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                      </div>
+                    ) : (
+                      <>
+                        <div style={{ display: "grid", gridTemplateColumns: "0.55fr 0.8fr 1.4fr", gap: 10 }}>
+                          <WizInput label="IVR" value={wizForm.ivr} onChange={wizF("ivr")} inputMode="numeric" />
+                          <WizInput label="Comisión" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                          <WizInput label="Margen requerido $" value={wizForm.margen} onChange={wizF("margen")} inputMode="decimal" />
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                          <WizInput label="Riesgo plausible %" value={wizForm.plausible} onChange={wizF("plausible")} inputMode="numeric" />
+                          <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                        </div>
+                      </>
+                    )}
+                    {(() => {
+                      /* resumen en vivo: BEP siempre Strike − Prima (criterio wheel del framework, también en short call:
+                         la prima rebaja el coste efectivo), crédito/débito total y riesgo plausible = BEP × qty × factor% */
+                      const cts = parseFloat(String(wizForm.contratos || "").replace(",", "."));
+                      const pr = parseFloat(String(wizForm.prima || "").replace(",", "."));
+                      const s = parseFloat(String(wizForm.strike || "").replace(",", "."));
+                      const plausPct = parseFloat(String(wizForm.plausible || "").replace(",", "."));
+                      const isCall = (wizStrat || "").toLowerCase().includes("call");
+                      const isCovered = isCall; /* toda call corta es covered */
+                      const tot = isFinite(cts) && isFinite(pr) ? cts * pr * 100 : null;
+                      const bep = isFinite(s) && isFinite(pr) ? s - pr : null;
+                      const riesgo = isCovered ? 0 : (bep !== null && isFinite(cts) ? bep * cts * 100 : null);
+                      const plaus = riesgo !== null && isFinite(plausPct) ? riesgo * plausPct / 100 : (isCovered ? 0 : null);
+                      if (tot === null && bep === null) return null;
+                      return (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          {bep !== null && (
+                            <div style={{ background: T.tile, borderRadius: 12, padding: "8px 12px" }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.3 }}>BEP = Strike − Prima</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>${bep.toFixed(2)}</div>
+                            </div>
+                          )}
+                          {plaus !== null && (
+                            <div style={{ background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: T.green, textTransform: "uppercase", letterSpacing: 0.3 }}>Riesgo plausible{isCovered ? " (cubierta)" : ""}</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums" }}>${plaus.toLocaleString("en-US", { maximumFractionDigits: 0 })}</div>
+                            </div>
+                          )}
+                          {tot !== null && (
+                            <div style={{ gridColumn: "span 2", fontSize: 12, fontWeight: 700, color: T.sub, padding: "0 2px" }}>
+                              {tot >= 0 ? "Crédito" : "Débito"} total: <span style={{ color: tot >= 0 ? T.green : T.red, fontWeight: 800 }}>{(tot >= 0 ? "+$" : "-$") + Math.abs(tot).toFixed(2)}</span>
+                              {riesgo !== null && !isCovered && <span> · Riesgo total: <span style={{ color: T.ink, fontWeight: 800 }}>${riesgo.toLocaleString("en-US", { maximumFractionDigits: 0 })}</span></span>}
+                              {isCovered && <span> · Cubierta por acciones: no suma riesgo al bloque</span>}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+                {(wizNat === "ACC" || wizNat === "CASH") && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Cantidad (acciones)" value={wizForm.qty} onChange={wizF("qty")} inputMode="numeric" />
+                      <WizInput label="BEP (coste medio)" value={wizForm.bep} onChange={wizF("bep")} inputMode="decimal" />
+                    </div>
+                    {(wizNat === "ACC" || wizBlock !== 0) && (
+                      <div style={{ display: "grid", gridTemplateColumns: wizNat === "ACC" && wizBlock !== 0 ? "1fr 1fr" : "1fr", gap: 10 }}>
+                        {wizNat === "ACC" && <WizInput label="Margen Requerido %" value={wizForm.margenPct} onChange={wizF("margenPct")} inputMode="decimal" />}
+                        {wizBlock !== 0 && <WizInput label="Riesgo plausible %" value={wizForm.plausible} onChange={wizF("plausible")} inputMode="numeric" />}
+                      </div>
+                    )}
+                    {wizNat === "ACC" && <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />}
+                    <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                  </>
+                )}
+                {wizNat === "COLLAR" && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
+                      <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
+                    </div>
+                    {/* collar sin riesgo → el plausible de la acción de B1 pasa a 0 (sigue contando en sizing);
+                       con riesgo → se introduce el BEP protegido y esa es la nueva base del plausible de la acción */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: T.tile, borderRadius: 12, padding: "9px 12px" }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: T.ink }}>¿El collar deja riesgo?</span>
+                      <Pill options={["No", "Sí"]} value={wizForm.collarRisk === "SI" ? "Sí" : "No"} onChange={(v) => setWizForm((f) => ({ ...f, collarRisk: v === "Sí" ? "SI" : "NO" }))} size="sm" />
+                    </div>
+                    {wizForm.collarRisk === "SI" && (
+                      <WizInput label="Nuevo BEP para el plausible de la acción" value={wizForm.collarBep} onChange={wizF("collarBep")} placeholder="$" inputMode="decimal" />
+                    )}
+                    {/* precio de apertura $/acc del collar: negativo si pagas débito, positivo si cobras prima
+                       neta. Se guarda como precio de entrada — al cerrar, Movimientos·MTM calcula el realizado
+                       como (precio de cierre − apertura) × cantidad − fee */}
+                    <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.7fr", gap: 10 }}>
+                      <WizInput label="Precio apertura $/acc · + prima cobrada − pagada" value={wizForm.prima} onChange={wizF("prima")} placeholder="$" inputMode="decimal" signed />
+                      <WizInput label="Comisión" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                    </div>
+                    <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                  </>
+                )}
+                {wizNat === "DEF" && wizStrat === "Long Call" && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Strike" value={wizForm.strike} onChange={wizF("strike")} inputMode="decimal" />
+                      <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
+                      <WizInput label="Prima pagada $/acc" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" />
+                    </div>
+                    {(() => {
+                      /* Long Call: BEP = Strike + Prima pagada. Riesgo = 100% de la prima pagada (prima × contratos × 100),
+                         que es a la vez el riesgo total y el plausible — no hay factor ni coste manual. */
+                      const cts = parseFloat(String(wizForm.contratos || "").replace(",", "."));
+                      const pr = Math.abs(parseFloat(String(wizForm.prima || "").replace(",", ".")));
+                      const s = parseFloat(String(wizForm.strike || "").replace(",", "."));
+                      const bep = isFinite(s) && isFinite(pr) ? s + pr : null;
+                      const cost = isFinite(pr) && isFinite(cts) ? pr * cts * 100 : null;
+                      if (bep === null && cost === null) return null;
+                      return (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          {bep !== null && (
+                            <div style={{ background: T.tile, borderRadius: 12, padding: "8px 12px" }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.3 }}>BEP = Strike + Prima</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>${bep.toFixed(2)}</div>
+                            </div>
+                          )}
+                          {cost !== null && (
+                            <div style={{ background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: T.green, textTransform: "uppercase", letterSpacing: 0.3 }}>Riesgo = prima pagada</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums" }}>${cost.toLocaleString("en-US", { maximumFractionDigits: 0 })}</div>
+                            </div>
+                          )}
+                          {cost !== null && (
+                            <div style={{ gridColumn: "span 2", fontSize: 12, fontWeight: 700, color: T.sub, padding: "0 2px" }}>
+                              Débito total: <span style={{ color: T.red, fontWeight: 800 }}>{"-$" + cost.toFixed(2)}</span> · el riesgo plausible es el 100% de la prima
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                      <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                    </div>
+                  </>
+                )}
+                {wizNat === "DEF" && wizStrat !== "Long Call" && wizStrat !== "PMCC" && (
+                  <>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
+                      <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Coste / riesgo $" value={wizForm.margen} onChange={wizF("margen")} inputMode="decimal" />
+                      <WizInput label="BEP (opcional)" value={wizForm.bep} onChange={wizF("bep")} inputMode="decimal" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Riesgo plausible %" value={wizForm.plausible} onChange={wizF("plausible")} inputMode="numeric" />
+                      <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                    </div>
+                    <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                  </>
+                )}
+                {wizNat === "DEF" && wizStrat === "PMCC" && (
+                  <>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2, marginBottom: 2 }}>
+                      <span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, textTransform: "uppercase", letterSpacing: 0.5 }}>▸ Long leg · call comprada</span>
+                      <div style={{ flex: 1, height: 1, background: T.line }} />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Strike" value={wizForm.lgStrike} onChange={wizF("lgStrike")} inputMode="decimal" />
+                      <WizInput label="Vencimiento" value={wizForm.lgExpiry} onChange={wizF("lgExpiry")} type="date" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
+                      <WizInput label="Prima pagada $/acc" value={wizForm.lgPrima} onChange={wizF("lgPrima")} inputMode="decimal" />
+                    </div>
+                    <WizInput label="Comisión de entrada" value={wizForm.lgComision} onChange={wizF("lgComision")} placeholder="$" inputMode="decimal" />
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, marginBottom: 2 }}>
+                      <span style={{ fontSize: 10.5, fontWeight: 800, color: T.red, textTransform: "uppercase", letterSpacing: 0.5 }}>▸ Short leg · call vendida</span>
+                      <div style={{ flex: 1, height: 1, background: T.line }} />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Strike" value={wizForm.strike} onChange={wizF("strike")} inputMode="decimal" />
+                      <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Prima cobrada" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" />
+                      <WizInput label="IVR" value={wizForm.ivr} onChange={wizF("ivr")} inputMode="numeric" />
+                    </div>
+                    <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                    {(() => {
+                      /* PMCC: BEP = prima long pagada − prima short cobrada (débito neto por acción).
+                         Riesgo = ese débito neto × contratos × 100 (mín. 0). Los rolls de la short bajarán el BEP. */
+                      const cts = parseFloat(String(wizForm.contratos || "").replace(",", "."));
+                      const lp = Math.abs(parseFloat(String(wizForm.lgPrima || "").replace(",", ".")));
+                      const sp = Math.abs(parseFloat(String(wizForm.prima || "").replace(",", ".")));
+                      const net = (isFinite(lp) ? lp : NaN) - (isFinite(sp) ? sp : 0);
+                      if (!isFinite(lp)) return null;
+                      const risk = isFinite(cts) ? Math.max(0, net) * cts * 100 : null;
+                      return (
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                          <div style={{ background: T.tile, borderRadius: 12, padding: "8px 12px" }}>
+                            <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.3 }}>BEP = prima long − short</div>
+                            <div style={{ fontSize: 16, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>${net.toFixed(2)}</div>
+                          </div>
+                          {risk !== null && (
+                            <div style={{ background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>
+                              <div style={{ fontSize: 9.5, fontWeight: 700, color: T.green, textTransform: "uppercase", letterSpacing: 0.3 }}>Riesgo = BEP × qty</div>
+                              <div style={{ fontSize: 16, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums" }}>${risk.toLocaleString("en-US", { maximumFractionDigits: 0 })}</div>
+                            </div>
+                          )}
+                          <div style={{ gridColumn: "span 2", fontSize: 11.5, fontWeight: 700, color: T.sub, padding: "0 2px" }}>
+                            La short se rola como cualquier short call; cada crédito nuevo baja el BEP y el riesgo.
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
+                  </>
+                )}
+                <button onClick={wizSave} disabled={!(wizForm.tkr || "").trim()} style={{ marginTop: 4, background: (wizForm.tkr || "").trim() ? T.green : T.tile, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 800, color: (wizForm.tkr || "").trim() ? "#fff" : T.sub, cursor: "pointer" }}>Añadir a Bloque {wizBlock}</button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={{ position: "fixed", left: 12, right: 12, bottom: 14, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
+        <div style={{ display: "flex", width: "100%", maxWidth: 540, background: "rgba(24,22,26,0.94)", backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", borderRadius: 26, padding: "7px 8px", boxShadow: "0 12px 34px rgba(0,0,0,0.4)", pointerEvents: "auto" }}>
+          {[["bloques", "portfolio", "Portfolio"], ["movimientos", "movimientos", "Movimientos"], ["vencimientos", "vencimientos", "Vencimientos"], ["comparador", "comparador", "Comparador"], ["ajustes", "ajustes", "Ajustes"]].map(([id, icon, label]) => {
+            const act = view === id;
+            return (
+              <button key={id} onClick={() => selectView(id)} style={{
+                flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
+                background: act ? "rgba(255,255,255,0.10)" : "transparent", borderRadius: 19, padding: "7px 0 6px",
+                color: act ? T.purple : "rgba(255,255,255,0.92)",
+              }}>
+                <NavIcon name={icon} />
+                <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 0.1, whiteSpace: "nowrap", color: act ? T.purple : "rgba(255,255,255,0.92)" }}>{label}</span>
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
