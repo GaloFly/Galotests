@@ -120,7 +120,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.99";
+const APP_VERSION = "5.05";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -175,6 +175,7 @@ const NATS = [
 const natsForBlock = (block) => {
   if (block === 0) return [{ id: "ACC", label: "ETF" }, { id: "CASH", label: "Cash" }]; /* B0: liquidez — ETF (treasury/money market) o cash */
   if (block === 1) return NATS.filter((x) => x.id !== "CASH" && x.id !== "DEF"); /* B1: sin estrategias de débito */
+  if (block === 3) return NATS.filter((x) => x.id === "CRED" || x.id === "DEF"); /* B3: táctico/definido — sin acciones (v5.00) */
   return NATS.filter((x) => x.id !== "COLLAR" && x.id !== "CASH");
 };
 /* estrategias por bloque (desplegable de la etiqueta p.tipo) */
@@ -234,6 +235,10 @@ const effBep = (p) => {
    No se ancla al BEP×qty como el resto de débito, y no lleva factor de plausible. */
 const isLongCallPos = (p) => natOf(p) === "DEF" && BEP_DEBIT_STRATS.has(p.tipo);
 const longCallCost = (p) => Math.abs(n(p.prima) * n(p.qty));
+/* débito genérico B3 (Calendar, DC, DD, Iron Man, Iron Fly… — v5.04): débito multi-pata que no es Long Call
+   ni credit spread. En Movimientos su cierre se contabiliza como MTM: neto = (venta − open price) × qty − fee,
+   nunca solo el cash de la venta (daría un profit engañoso al no netear el débito pagado). */
+const isGenericDebitPos = (p) => natOf(p) === "DEF" && !isCreditSpread(p) && !isLongCallPos(p);
 /* Iron Condor / Call Broken Wing / Put Broken Wing: spreads de CRÉDITO multi-pata en B2. Su riesgo no sale
    de una fórmula (varios strikes), así que se introduce a mano en "riesgo" (capDesplegado/riesgoTotalOf/
    plausibleOf ya usan p.riesgo directamente para nat=DEF). La prima cobrada se guarda para el cierre: al
@@ -1332,8 +1337,10 @@ function RollChainTable({ p }) {
   /* etiqueta de la pata: en credit spreads no es CALL/PUT sino la propia estrategia (IC = Iron Condor,
      BW = Broken Wing), porque cada "pata" es en realidad el spread completo abierto/cerrado de una vez. */
   const rightLabel = cs ? (p.tipo === "Iron Condor" ? "IC" : "BW") : (p.right === "C" ? "CALL" : "PUT");
-  /* strikes que se muestran en la columna Strike: en IC los dos spreads juntos, en broken wing el único. */
-  const csStrikes = cs ? [p.putSpread, p.callSpread].filter(Boolean).join(" · ") : "";
+  /* strikes que se muestran en la columna Strike: en IC los dos spreads APILADOS en dos mini-filas dentro
+     de la misma celda (v5.00 — en una sola línea desbordaban la columna y pisaban el Expiry); en broken
+     wing, el único spread. Fuente mucho más pequeña que la de un strike normal. */
+  const csStrikes = cs ? [p.putSpread, p.callSpread].filter(Boolean) : [];
   const shortSide = natOf(p) === "CRED" || isCreditSpread(p); // corta (o credit spread): apertura = VENTA, recompra = COMPRA
   const q = n(p.qty);
   /* PMCC: el strike de la short no representa el riesgo real de la operación (que es de débito, cubierto
@@ -1341,6 +1348,10 @@ function RollChainTable({ p }) {
      neto por acción), en vez de %Strike. */
   const pmcc = isPMCC(p);
   const retLabel = pmcc ? "%Riesgo" : "%Strike";
+  /* credit spreads (v5.02): sin columna %Strike — el retorno sobre strike no aplica a un spread de dos alas
+     (no hay un strike de referencia); la rentabilidad ya la dan ROI y Annualized en la cabecera. */
+  const gridCols = pmcc ? "62px 118px 64px 78px 44px 46px 42px 60px 66px 84px 60px 72px" : cs ? "62px 104px 64px 78px 44px 46px 60px 66px 84px" : "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px";
+  const gridMinW = pmcc ? 886 : cs ? 680 : 758;
   const retDenom = pmcc ? Math.abs(pmccNetDebit(p)) : null;
   const retOf = (perShare, strike) => (pmcc ? (retDenom ? perShare / retDenom : NaN) : (n(strike) ? perShare / n(strike) : NaN));
   const openingPrima = chain.length > 0 ? n(chain[0].prevPrima) : n(p.prima);
@@ -1351,10 +1362,16 @@ function RollChainTable({ p }) {
   const LegRow = ({ date, action, actionLabel, strike, expiry, perShare, amount, fee, ivr, delta, bepAfter, ret, isBuy, isExp }) => {
     const legDays = daysBetween(date, expiry);
     return (
-      <div style={{ display: "grid", gridTemplateColumns: pmcc ? "62px 118px 64px 78px 44px 46px 42px 60px 66px 84px 60px 72px" : "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+      <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(date)}</span>
         <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{actionLabel || (action + " " + rightLabel)}</span>
-        <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{cs ? (csStrikes || "—") : strikeStr(strike) + p.right}</span>
+        {cs ? (
+          <span style={{ display: "flex", flexDirection: "column", lineHeight: 1.25, justifyContent: "center" }}>
+            {csStrikes.length ? csStrikes.map((s, i) => <span key={i} style={{ fontSize: 9, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{s}</span>) : <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink }}>—</span>}
+          </span>
+        ) : (
+          <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{strikeStr(strike) + p.right}</span>
+        )}
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, whiteSpace: "nowrap" }}>{expiry ? shortDate(expiry) : "—"}</span>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(legDays) ? legDays + "d" : "—"}</span>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{ivr || "—"}</span>
@@ -1363,7 +1380,7 @@ function RollChainTable({ p }) {
         <span style={{ fontSize: 12.5, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(perShare))}</span>
         <span style={{ fontSize: 13, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(amount))}</span>
         {pmcc && <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textAlign: "right", whiteSpace: "nowrap" }}>{bepAfter != null && isFinite(bepAfter) ? "$" + money2(bepAfter) : "—"}</span>}
-        <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>
+        {!cs && <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>}
       </div>
     );
   };
@@ -1386,6 +1403,7 @@ function RollChainTable({ p }) {
   if (pmcc) bepRun -= openingPrima;
   rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStk} expiry={openingExp} perShare={openingPrima} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} delta={p.delta} bepAfter={pmcc ? bepRun : undefined} ret={retOf(openingPrima, openingStk)} isBuy={!shortSide} />);
   acc(!shortSide, openAmt, p.comision, false);
+  if (p.entryNote) rows.push(<div key="entrynote" style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 6px 4px", lineHeight: 1.4 }}>💬 {p.entryNote}</div>);
   chain.forEach((r, idx) => {
     const buyAmt = n(r.buybackCost) * q, sellAmt = n(r.newCredit) * q;
     rows.push(<LegRow key={"b" + idx} date={r.date} action={shortSide ? "COMPRA" : "VENTA"} strike={r.prevStrike} expiry={r.prevExpiry} perShare={n(r.buybackCost)} amount={buyAmt} fee={n(r.comision)} isBuy={shortSide} />);
@@ -1415,9 +1433,9 @@ function RollChainTable({ p }) {
   );
   return (
     <div style={{ overflowX: "auto", margin: "0 -12px", padding: "0 12px" }}>
-      <div style={{ minWidth: pmcc ? 886 : 758 }}>{/* columnas + gaps + padding; PMCC lleva dos columnas extra (Δ y BEP) */}
-        <div style={{ display: "grid", gridTemplateColumns: pmcc ? "62px 118px 64px 78px 44px 46px 42px 60px 66px 84px 60px 72px" : "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
-          {(pmcc ? ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Δ", "Fee", "Prima", "Importe", "BEP", retLabel] : ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", retLabel]).map((h, i) => (
+      <div style={{ minWidth: gridMinW }}>{/* columnas + gaps + padding; PMCC lleva dos columnas extra (Δ y BEP); credit spreads quitan %Strike */}
+        <div style={{ display: "grid", gridTemplateColumns: gridCols, gap: 6, padding: "0 10px 4px" }}>
+          {(pmcc ? ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Δ", "Fee", "Prima", "Importe", "BEP", retLabel] : cs ? ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe"] : ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", retLabel]).map((h, i) => (
             <span key={h} style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: i >= 4 ? "right" : "left" }}>{h}</span>
           ))}
         </div>
@@ -1609,6 +1627,7 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
             )
           )}
           {!cash && <EditField label="Comisión (entrada)" prefix="$" value={p.comision} onChange={onChange("comision")} />}
+          {!cash && <EditField label="Nota de entrada" value={p.entryNote} onChange={onChange("entryNote")} />}
           {isOptionNat(p) && <EditField label="IVR al abrir" value={p.ivr} onChange={onChange("ivr")} />}
           {!cash && <EditField label="Último (precio actual)" prefix="$" value={p.last} onChange={onChange("last")} />}
           {!cash && bepAutoStrat(p) && !isPMCC(p) && (
@@ -2017,7 +2036,7 @@ function MovimientosView({ positions, reopenPos }) {
            del PMCC) no se registra hasta que se cierra, igual que las acciones. */
         const fee = n(p.comision);
         const cash = openingPrimaPerShare(p) * qty - fee;
-        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: n(openingStrike(p)) - n(openingPrimaPerShare(p)), legs: [
+        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: n(openingStrike(p)) - n(openingPrimaPerShare(p)), note: p.entryNote || "", legs: [
           { side: "V", label: strikeStr(openingStrike(p)) + (p.right || "") + (openingExpiry(p) ? " " + ibkrDate(openingExpiry(p)) : ""), perShare: openingPrimaPerShare(p), cash: openingPrimaPerShare(p) * qty },
         ] });
       }
@@ -2039,26 +2058,42 @@ function MovimientosView({ positions, reopenPos }) {
         const fee = n(p.closeComision);
         const isExpira = n(p.closePrice) === 0;
         const shortP = dirSign(p) === -1;
-        const stkLbl = isCreditSpread(p) ? ([p.putSpread, p.callSpread].filter(Boolean).join(" · ") || "") : strikeStr(p.strike) + (p.right || "");
+        /* credit spreads (v5.00): la etiqueta de las patas en Primas/MTM pasa a ser la abreviatura de la
+           estrategia (IC / BW) + vencimiento — la ristra "715/720 · 760/765" no cabía y se truncaba;
+           los strikes completos siguen visibles en Estrategias y en la cadena de la posición. */
+        const stkLbl = isCreditSpread(p) ? (p.tipo === "Iron Condor" ? "IC" : "BW") : isGenericDebitPos(p) ? (p.tipo || "Débito") : strikeStr(p.strike) + (p.right || "");
         const expLbl = p.expiry ? " " + ibkrDate(p.expiry) : "";
         /* credit spreads (Iron Condor / Broken Wings): la prima cobrada NO se registró al abrir, así que
            el cierre materializa el NETO = (prima cobrada − recompra) × qty − fee, como un MTM. Si solo se
            registrara la recompra (pago), Primas quedaría en negativo sin el crédito que la compensa. */
+        /* débito genérico B3 (v5.04): mismo modelo — el débito de apertura no se registró, así que el
+           cierre materializa el NETO = (venta − open price) × qty − fee. Expirar sin valor = pérdida
+           completa del débito. Primas y MTM cuadran exactamente para estas estrategias. */
+        const gd = isGenericDebitPos(p);
         const cashClose = isCreditSpread(p)
           ? (n(p.prima) - n(p.closePrice)) * qty - fee
-          : dirSign(p) * n(p.closePrice) * qty - fee;
+          : gd
+            ? (n(p.closePrice) - n(p.prima)) * qty - fee
+            : dirSign(p) * n(p.closePrice) * qty - fee;
         const primaLegs = isCreditSpread(p)
           ? [
               { side: "V", label: stkLbl + expLbl, perShare: n(p.prima), cash: n(p.prima) * qty },
-              { side: "C", label: stkLbl, perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
+              { side: "C", label: stkLbl + expLbl, perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
             ]
-          : isExpira
-            ? [{ side: null, label: stkLbl + expLbl + " · expira", perShare: 0, cash: 0 }]
-            : [{ side: shortP ? "C" : "V", label: stkLbl + expLbl, perShare: dirSign(p) * n(p.closePrice), cash: dirSign(p) * n(p.closePrice) * qty }];
+          : gd
+            ? [
+                { side: "C", label: stkLbl + expLbl + " · open", perShare: -n(p.prima), cash: -n(p.prima) * qty },
+                isExpira
+                  ? { side: null, label: stkLbl + expLbl + " · expira", perShare: 0, cash: 0 }
+                  : { side: "V", label: stkLbl + expLbl, perShare: n(p.closePrice), cash: n(p.closePrice) * qty },
+              ]
+            : isExpira
+              ? [{ side: null, label: stkLbl + expLbl + " · expira", perShare: 0, cash: 0 }]
+              : [{ side: shortP ? "C" : "V", label: stkLbl + expLbl, perShare: dirSign(p) * n(p.closePrice), cash: dirSign(p) * n(p.closePrice) * qty }];
         primaEvents.push({ id: p.id + "-close", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: isExpira ? "Expirada" : "Cierre", cash: cashClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "", legs: primaLegs });
         const legEntry = chain.length > 0 ? n(chain[chain.length - 1].newCredit) : openingPrimaPerShare(p);
         const realizedClose = dirSign(p) * (n(p.closePrice) - legEntry) * qty - fee;
-        const mtmLegs = isCreditSpread(p)
+        const mtmLegs = (isCreditSpread(p) || gd)
           ? primaLegs
           : shortP
             ? [
@@ -2188,11 +2223,11 @@ function MovimientosView({ positions, reopenPos }) {
           )}
 
           {events.length > 0 && (
-            <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, padding: "4px 0 6px", borderBottom: `1px solid ${T.line}` }}>
+            <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, padding: "4px 0 6px 12px", borderBottom: `1px solid ${T.line}` }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Fecha</span>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Ticker</span>
               <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingRight: 8 }}>Fee</span>
-              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingLeft: 8 }}>{sub === "primas" ? "Prima" : "P&L"}</span>
+              <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: "right", paddingLeft: 8, paddingRight: 10 }}>{sub === "primas" ? "Prima" : "P&L"}</span>
             </div>
           )}
           {yearKeys.map((y) => {
@@ -2222,11 +2257,14 @@ function MovimientosView({ positions, reopenPos }) {
                 const open = expanded.has(e.id);
                 return (
                   <div key={e.id} onClick={() => toggleExpand(e.id)} style={{ borderTop: `1px solid ${T.line}`, cursor: "pointer" }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", padding: "9px 0", fontVariantNumeric: "tabular-nums" }}>
+                    {/* alineación (v5.03): las filas de detalle se sangran al interior de las cajas de total
+                       (12px izq, importe a 10px del borde dcho) — así fecha/ticker arrancan donde el texto
+                       "TOTAL <mes>" y los importes caen en la misma columna que los de las cajas. */}
+                    <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", padding: "9px 0 9px 12px", fontVariantNumeric: "tabular-nums" }}>
                       <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(e.date)}</span>
                       <span style={{ fontSize: 13.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", paddingRight: 6 }}>{e.tkr || "—"}</span>
                       <span style={{ fontSize: 12.5, fontWeight: 700, color: T.sub, textAlign: "right", whiteSpace: "nowrap", paddingRight: 8 }}>${money2(e.fee)}</span>
-                      <span style={{ fontSize: 13.5, fontWeight: 800, color: e.cash >= 0 ? T.green : T.red, textAlign: "right", whiteSpace: "nowrap", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(e.cash)}</span>
+                      <span style={{ fontSize: 13.5, fontWeight: 800, color: e.cash >= 0 ? T.green : T.red, textAlign: "right", whiteSpace: "nowrap", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>{signMoney(e.cash)}</span>
                     </div>
                     {open && (
                       <div style={{ marginBottom: 9, background: T.tile, borderRadius: 10, padding: "9px 11px" }}>
@@ -2245,7 +2283,7 @@ function MovimientosView({ positions, reopenPos }) {
                               <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "3px 0", fontVariantNumeric: "tabular-nums" }}>
                                 <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
                                   {l.side && (
-                                    <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 800, letterSpacing: 0.4, color: "#fff", background: l.side === "V" ? T.green : T.red, borderRadius: 6, padding: "2px 6px" }}>{l.side === "V" ? "VENTA" : "COMPRA"}</span>
+                                    <span style={{ flexShrink: 0, width: 56, textAlign: "center", fontSize: 9, fontWeight: 800, letterSpacing: 0.4, color: "#fff", background: l.side === "V" ? T.green : T.red, borderRadius: 6, padding: "2px 0" }}>{l.side === "V" ? "VENTA" : "COMPRA"}</span>
                                   )}
                                   <span style={{ fontSize: 11.5, fontWeight: 700, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.label}</span>
                                   <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: l.perShare >= 0 ? T.green : T.red, whiteSpace: "nowrap" }}>{(l.perShare >= 0 ? "+" : "-") + "$" + money2(Math.abs(l.perShare))}</span>
@@ -2276,17 +2314,19 @@ function MovimientosView({ positions, reopenPos }) {
 
           {events.length > 0 && (
             <div style={{ marginTop: 14, paddingTop: 12, borderTop: `2px solid ${T.line}` }}>
-              {Object.keys(yearTotals).sort().map((y) => (
-                <div key={y} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", marginBottom: 6, fontVariantNumeric: "tabular-nums" }}>
+              {/* con un solo año, la fila "Total <año>" duplicaría exactamente el acumulado (v5.02): solo se
+                 listan los años cuando hay más de uno que sumar. */}
+              {Object.keys(yearTotals).length > 1 && Object.keys(yearTotals).sort().map((y) => (
+                <div key={y} style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", marginBottom: 6, paddingLeft: 12, fontVariantNumeric: "tabular-nums" }}>
                   <span style={{ fontSize: 11.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total {y}</span>
                   <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(yearTotals[y].fees)}</span>
-                  <span style={{ fontSize: 13.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(yearTotals[y].total)}</span>
+                  <span style={{ fontSize: 13.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>{signMoney(yearTotals[y].total)}</span>
                 </div>
               ))}
-              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", paddingTop: 6, borderTop: `1px solid ${T.line}`, fontVariantNumeric: "tabular-nums" }}>
+              <div style={{ display: "grid", gridTemplateColumns: "64px 1fr 76px 100px", gap: 0, alignItems: "center", paddingTop: 6, paddingLeft: 12, borderTop: `1px solid ${T.line}`, fontVariantNumeric: "tabular-nums" }}>
                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.4, gridColumn: "span 2" }}>Total acum.</span>
                 <span style={{ fontSize: 12.5, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(grandFees)}</span>
-                <span style={{ fontSize: 15, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8 }}>{signMoney(grandTotal)}</span>
+                <span style={{ fontSize: 15, fontWeight: 800, color: grandTotal >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>{signMoney(grandTotal)}</span>
               </div>
             </div>
           )}
@@ -2355,9 +2395,10 @@ function MovimientosView({ positions, reopenPos }) {
                previsto de la operación — de la apertura original al vencimiento vigente (el mismo dte de
                arriba, que ya incorpora los rolls: si se rolo, el vencimiento es el nuevo pero la apertura
                sigue siendo la primera). Al cerrarse, se usa el DIT real (apertura → cierre). Los credit
-               spreads (Iron Condor, Broken Wings) no rolan y no reflejan prima hasta el cierre, así que
-               siempre se anualizan con el DIT real (abiertas o cerradas), nunca proyectando sobre el DTE. */
-            const annPeriod = (p.closed || isCreditSpread(p)) ? dit : dte;
+               spreads (Iron Condor, Broken Wings) no rolan y no reflejan prima hasta el cierre: cerrados se
+               anualizan con el DIT real; ABIERTOS se proyecta el ROI potencial sobre el DTE (v5.00 — antes
+               usaban DIT y el día de apertura, con DIT=0, el anualizado salía "—"). */
+            const annPeriod = p.closed ? dit : dte;
             const romAnn = isFinite(rom) && isFinite(annPeriod) && annPeriod > 0 ? rom * (365 / annPeriod) : NaN;
             /* ROI de acciones cerradas: P&L realizado / capital invertido (BEP × qty). Anualizado con el DIT real. */
             const stockBasis = Math.abs(n(effBep(p)) * n(p.qty));
@@ -2398,7 +2439,7 @@ function MovimientosView({ positions, reopenPos }) {
                           </div>
                           <div style={{ textAlign: "right" }}>
                             <div style={{ fontSize: 24, fontWeight: 800, color: isFinite(romAnn) && romAnn >= 0 ? T.green : T.red, letterSpacing: -0.5 }}>{fmtPct2(romAnn)}</div>
-                            <div style={{ fontSize: 11, color: T.sub, fontWeight: 500 }}>Annualized ROI{csPending ? " (potencial · DIT)" : ""}</div>
+                            <div style={{ fontSize: 11, color: T.sub, fontWeight: 500 }}>Annualized ROI{csPending ? " (potencial · DTE)" : ""}</div>
                           </div>
                         </div>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
@@ -2418,9 +2459,17 @@ function MovimientosView({ positions, reopenPos }) {
                         </div>
                         {/* fila alineada de tiles: IVR · Strike(s) · DTE · DIT — en credit spreads el Strike son los spreads */}
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8, marginBottom: (natOf(p) === "CRED" || chain.length > 0 || p.closed) ? 10 : 0 }}>
-                          {[["IVR", p.ivr || "—"], [isCreditSpread(p) ? "Strikes" : "Strike", isCreditSpread(p) ? ([p.putSpread, p.callSpread].filter(Boolean).join(" · ") || "—") : (n(p.strike) ? "$" + strikeStr(p.strike) : "—")], ["DTE", isFinite(dte) ? dte + "d" : "—"], ["DIT", isFinite(dit) ? dit + "d" : "—"]].map(([lbl, val]) => (
-                            <div key={lbl} style={{ background: T.card, borderRadius: 14, padding: "10px 4px", textAlign: "center", minWidth: 0 }}>
-                              <div style={{ fontSize: lbl === "Strikes" ? 11.5 : 15, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
+                          {/* Strikes de credit spreads (v5.00): las dos alas apiladas (put arriba, call debajo) en vez
+                             de una línea truncada con "…" — así ambos spreads se leen completos dentro del tile. */}
+                          {[["IVR", p.ivr || "—"], [isCreditSpread(p) ? "Strikes" : "Strike", isCreditSpread(p) ? ([p.putSpread, p.callSpread].filter(Boolean)) : (n(p.strike) ? "$" + strikeStr(p.strike) : "—")], ["DTE", isFinite(dte) ? dte + "d" : "—"], ["DIT", isFinite(dit) ? dit + "d" : "—"]].map(([lbl, val]) => (
+                            <div key={lbl} style={{ background: T.card, borderRadius: 14, padding: "10px 4px", textAlign: "center", minWidth: 0, display: "flex", flexDirection: "column", justifyContent: "center" }}>
+                              {Array.isArray(val) ? (
+                                <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
+                                  {val.length ? val.map((s, i) => <span key={i} style={{ fontSize: 11.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{s}</span>) : <span style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>—</span>}
+                                </div>
+                              ) : (
+                                <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
+                              )}
                               <div style={{ fontSize: 10, color: T.sub, marginTop: 2, fontWeight: 500 }}>{lbl}</div>
                             </div>
                           ))}
@@ -2873,6 +2922,7 @@ function App() {
   const [geminiModalOpen, setGeminiModalOpen] = useState(false);
   const [geminiInput, setGeminiInput] = useState("");
   const [refreshChoiceOpen, setRefreshChoiceOpen] = useState(false);
+  const [pendingAutoRefresh, setPendingAutoRefresh] = useState(false); /* arranque: descarga directa de precios si hay key (v5.05) */
   const [updChecking, setUpdChecking] = useState(false);
   const [updCheckMsg, setUpdCheckMsg] = useState("");
   const [snapshots, setSnapshots] = useState([]);
@@ -2942,9 +2992,12 @@ function App() {
     try { const a = localStorage.getItem(KEY_ACC); if (a) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
     try { const p = localStorage.getItem(KEY_POS); if (p) { setPositions(withNat(JSON.parse(p))); havePos = true; } } catch (e) {}
     try { const k = localStorage.getItem(KEY_FINNHUB); if (k) setApiKey(k); } catch (e) {}
-    /* al abrir la app, ofrecer siempre actualizar precios: si hay API key guardada se abre directamente
-       la hoja de "Actualizar precios / Cambiar key". Sin key no se molesta (primer uso). */
-    try { if (localStorage.getItem(KEY_FINNHUB)) setRefreshChoiceOpen(true); } catch (e) {}
+    /* al abrir la app (v5.05): si hay API key guardada, los precios se descargan DIRECTAMENTE, sin pasar
+       por la hoja de "Actualizar precios / Cambiar key" — esa hoja solo aparece si se pulsa el botón.
+       Sin key no se molesta (primer uso). Se marca un flag en vez de llamar a runRefresh aquí porque en
+       este efecto las posiciones aún no están en el estado (se acaban de leer de localStorage): el flag
+       dispara la descarga en el siguiente render, ya con las posiciones cargadas. */
+    try { if (localStorage.getItem(KEY_FINNHUB)) setPendingAutoRefresh(true); } catch (e) {}
     try { const gk = localStorage.getItem(KEY_GEMINI); if (gk) setGeminiKey(gk); } catch (e) {}
     try { const s = localStorage.getItem(KEY_SNAP); if (s) setSnapshots(JSON.parse(s)); } catch (e) {}
     try { const bk = localStorage.getItem(KEY_BROKERS); if (bk) { const arr = JSON.parse(bk); if (Array.isArray(arr) && arr.length) setBrokers(arr); } } catch (e) {}
@@ -3110,6 +3163,15 @@ function App() {
     if (apiKey) { setRefreshChoiceOpen(true); return; }
     setKeyInput(""); setKeyModalOpen(true);
   };
+  /* descarga automática al arrancar (v5.05): corre en el render posterior al efecto de carga, cuando
+     posiciones y key ya están en el estado — runRefresh captura las posiciones correctas y el snapshot
+     no machaca datos. Solo se dispara una vez por arranque. */
+  useEffect(() => {
+    if (pendingAutoRefresh && apiKey && !refreshing) {
+      setPendingAutoRefresh(false);
+      runRefresh(apiKey);
+    }
+  }, [pendingAutoRefresh, apiKey]);
   /* tirar de la página hacia abajo = refrescar precios directamente (sin el modal de elegir acción:
      el gesto ya es una intención inequívoca). Si no hay key guardada, abre el modal para pedirla,
      igual que la primera vez que se toca el botón "🔄 Precios". */
@@ -3276,17 +3338,22 @@ function App() {
     const pmShortPS = Math.abs(parseFloat(String(f.prima || "").replace(",", ".")));
     const pmNetDebit = (isFinite(pmLongPS) ? pmLongPS : 0) - (isFinite(pmShortPS) ? pmShortPS : 0);
     const pmRisk = isPMCCw && isFinite(cts) ? String(Math.max(0, pmNetDebit) * cts * 100) : "";
+    /* débito genérico B3 (v5.02): sin riesgo manual — riesgo = open price × contratos × 100 (débito pagado,
+       máx pérdida). El open price se guarda en p.prima; al cerrar, el realizado sale de (venta − open) × qty. */
+    const isGenericDebit = nat === "DEF" && !isLongCall && !isPMCCw && !CREDIT_SPREAD_STRATS.has(wizStrat);
+    const gdPrimaPS = Math.abs(parseFloat(String(f.prima || "").replace(",", ".")));
+    const gdCost = isGenericDebit && isFinite(gdPrimaPS) && isFinite(cts) ? String(gdPrimaPS * cts * 100) : "";
     const p = {
       id: newId(), block: wizBlock, broker: f.broker, tkr: (f.tkr || "").toUpperCase().trim(),
       tipo: wizStrat, nat: effNat, right,
       strike: f.strike || "", expiry: f.expiry || "", qty,
       bep: (isLongCall || isPMCCw || CREDIT_SPREAD_STRATS.has(wizStrat)) ? "" : (f.bep || ""), prima: isLongCall ? (isFinite(lcPrimaPS) ? String(lcPrimaPS) : "") : isPMCCw ? (isFinite(pmShortPS) ? String(pmShortPS) : "") : (f.prima || ""), comision: f.comision || "", ivr: f.ivr || "",
-      last: "", mktValue: "", riesgo: isLongCall ? lcCost : isPMCCw ? pmRisk : (nat === "DEF" ? (f.margen || "") : ""),
-      factor, margen: isLongCall ? lcCost : isPMCCw ? pmRisk : (f.margen || ""),
+      last: "", mktValue: "", riesgo: isLongCall ? lcCost : isPMCCw ? pmRisk : isGenericDebit ? gdCost : (nat === "DEF" ? (f.margen || "") : ""),
+      factor, margen: isLongCall ? lcCost : isPMCCw ? pmRisk : isGenericDebit ? gdCost : (f.margen || ""),
       margenPct: effNat === "ACC" || effNat === "CASH" ? (f.margenPct || "") : "100",
       margenModo: effNat === "ACC" || effNat === "CASH" ? "PCT" : "VALOR",
       mktModo: "AUTO", pnlModo: isPMCCw ? "MANUAL" : (nat === "ACC" || nat === "CRED" ? "AUTO" : "MANUAL"), pnl: "0",
-      entryDate: f.entryDate || "", rollChain: [],
+      entryDate: f.entryDate || "", entryNote: (f.entryNote || "").trim(), rollChain: [],
       covered: effNat === "CRED" && right === "C" && !isPMCCw,
       coveredBy: ((effNat === "CRED" && right === "C" && !isPMCCw) || nat === "COLLAR") ? (f.coveredStockId || "") : "",
       long: isPMCCw ? { strike: f.lgStrike || "", expiry: f.lgExpiry || "", prima: isFinite(pmLongPS) ? String(pmLongPS) : "", comision: f.lgComision || "", delta: f.lgDelta || "" } : undefined,
@@ -4480,19 +4547,28 @@ function App() {
                 )}
                 {wizNat === "DEF" && wizStrat !== "Long Call" && wizStrat !== "PMCC" && wizStrat !== "Diagonal" && !CREDIT_SPREAD_STRATS.has(wizStrat) && (
                   <>
+                    {/* débito genérico B3 (Calendar, DC, DD, Iron Man, Iron Fly — v5.02): solo ticker (arriba),
+                       vencimiento, contratos y open price. El riesgo NO se pide: es el débito pagado =
+                       open price × contratos × 100 (máx pérdida de una estrategia de débito). */}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
                       <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
                     </div>
+                    <WizInput label="Open price $/acc (débito pagado)" value={wizForm.prima} onChange={wizF("prima")} placeholder="$" inputMode="decimal" />
+                    {(() => {
+                      const ct = parseFloat(String(wizForm.contratos || "").replace(",", "."));
+                      const op = Math.abs(parseFloat(String(wizForm.prima || "").replace(",", ".")));
+                      const rk = isFinite(ct) && isFinite(op) ? op * ct * 100 : NaN;
+                      return isFinite(rk) ? (
+                        <div style={{ background: T.tile, borderRadius: 12, padding: "9px 12px", fontSize: 12, fontWeight: 700, color: T.sub }}>
+                          Riesgo (débito total): <span style={{ color: T.ink, fontWeight: 800 }}>${money2(rk)}</span> — open price × contratos × 100
+                        </div>
+                      ) : null;
+                    })()}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <WizInput label="Coste / riesgo $" value={wizForm.margen} onChange={wizF("margen")} inputMode="decimal" />
-                      <WizInput label="BEP (opcional)" value={wizForm.bep} onChange={wizF("bep")} inputMode="decimal" />
-                    </div>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <WizInput label="Riesgo plausible %" value={wizForm.plausible} onChange={wizF("plausible")} inputMode="numeric" />
                       <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                      <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
                     </div>
-                    <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
                   </>
                 )}
                 {CREDIT_SPREAD_STRATS.has(wizStrat) && (
@@ -4610,6 +4686,7 @@ function App() {
                     <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
                   </>
                 )}
+                <WizInput label="Nota de entrada (opcional)" value={wizForm.entryNote} onChange={wizF("entryNote")} placeholder="Ej. tesis, catalizador, plan de salida…" />
                 <button onClick={wizSave} disabled={!(wizForm.tkr || "").trim()} style={{ marginTop: 4, background: (wizForm.tkr || "").trim() ? T.green : T.tile, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 800, color: (wizForm.tkr || "").trim() ? "#fff" : T.sub, cursor: "pointer" }}>Añadir a Bloque {wizBlock}</button>
               </div>
             )}
