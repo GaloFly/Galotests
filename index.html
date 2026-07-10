@@ -120,7 +120,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "4.87";
+const APP_VERSION = "4.99";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -181,8 +181,8 @@ const natsForBlock = (block) => {
 const STRATS = {
   0: ["Treasury ETF", "Money Market", "Cash"],
   1: ["Long Stock", "Short Put", "Covered Call", "Collar"],
-  2: ["Long Stock", "Short Put", "Covered Call", "Diagonal", "DD", "Calendar", "DC", "Iron Condor", "PMCC", "Call Broken Wing", "Put Broken Wing", "Long Call"],
-  3: ["Calendar", "DC", "Diagonal", "DD", "Iron Man", "Iron Fly", "Iron Condor"],
+  2: ["Long Stock", "Short Put", "Covered Call", "Diagonal", "PMCC", "Long Call"],
+  3: ["Calendar", "DC", "Diagonal", "DD", "Iron Man", "Iron Fly", "Iron Condor", "Call Broken Wing", "Put Broken Wing"],
 };
 const natFromStrat = (strat) => {
   const t = (strat || "").toLowerCase();
@@ -199,6 +199,7 @@ const inferNat = (p) => {
   if (t.includes("stock") || t.includes("acci")) return "ACC";
   if (t.includes("collar")) return "COLLAR";
   if (t.includes("short put") || t.includes("covered")) return "CRED";
+  if (t === "pmcc" || t === "diagonal") return "CRED"; /* dos patas estilo PMCC: la short registra prima */
   return "DEF";
 };
 const natOf = (p) => p.nat || inferNat(p);
@@ -216,7 +217,10 @@ const bepAutoStrat = (p) => (natOf(p) === "CRED" ? "CREDIT" : BEP_DEBIT_STRATS.h
    se guarda en p.long = { strike, expiry, prima }. El "BEP" del PMCC no es un precio: es el DÉBITO NETO por
    acción = prima pagada por la long − prima (acumulada) cobrada por la short. El riesgo = ese débito neto × qty
    (mínimo 0: si se ha cobrado más de lo pagado, ya no hay riesgo). */
-const isPMCC = (p) => (p.tipo || "").toLowerCase() === "pmcc";
+/* PMCC y Diagonal comparten mecánica EXACTA (long call + short call rolable): la Diagonal es un PMCC
+   con la long de vencimiento más corto. Todo el código (wizard, editor, cierre en dos patas, cadena con
+   BEP decreciente, motor de eventos, riesgo por débito neto) los trata igual vía este predicado. */
+const isPMCC = (p) => { const t = (p.tipo || "").toLowerCase(); return t === "pmcc" || t === "diagonal"; };
 const pmccNetDebit = (p) => n((p.long || {}).prima) - n(p.prima); // por acción; baja según acumula la short
 const pmccRisk = (p) => Math.max(0, pmccNetDebit(p)) * n(p.qty);
 const effBep = (p) => {
@@ -1282,7 +1286,8 @@ function AportacionesCard({ flows, setFlows, brokers }) {
 function SwipeDelete({ onDelete, disabled, children }) {
   const [dx, setDx] = useState(0);
   const ref = React.useRef({ x: 0, y: 0, drag: null, base: 0 });
-  const W = 92;
+  const W = 100; // 92 de botón + 8 de separación con la fila
+  const OVER_MAX = 70; // exceso máximo de arrastre más allá del botón (con resistencia)
   /* con disabled (fila expandida en edición o roll) el swipe se desactiva por completo: el panel de roll
      tiene una tabla con scroll horizontal propio y el gesto chocaba con el deslizable de eliminar */
   useEffect(() => { if (disabled && dx !== 0) setDx(0); }, [disabled]);
@@ -1293,20 +1298,24 @@ function SwipeDelete({ onDelete, disabled, children }) {
     const mx = t.clientX - r.x, my = t.clientY - r.y;
     if (r.drag == null) { if (Math.abs(mx) < 8 && Math.abs(my) < 8) return; r.drag = Math.abs(mx) > Math.abs(my) * 1.2; }
     if (!r.drag) return;
-    setDx(Math.max(-W, Math.min(0, r.base + mx)));
+    /* estilo iOS: hasta −W la fila sigue al dedo 1:1; más allá sigue moviéndose pero con resistencia
+       elástica (0.35×), para que el gesto se sienta fluido en vez de chocar con un tope duro */
+    let next = Math.min(0, r.base + mx);
+    if (next < -W) next = -W + Math.max(next + W, -OVER_MAX / 0.35) * 0.35;
+    setDx(next);
   };
   const onTouchEnd = () => { ref.current.drag = null; setDx((d) => (d < -W / 2 ? -W : 0)); };
   return (
     <div data-swipeopen={dx !== 0 ? "1" : undefined} style={{ position: "relative", overflow: "hidden" }}>
       {!disabled && (
-      <div style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: W, display: "flex" }}>
-        <button onClick={() => { setDx(0); onDelete(); }} style={{ flex: 1, margin: "10px 0", border: "none", borderRadius: 14, background: T.red, color: "#fff", fontSize: 12.5, fontWeight: 800, cursor: "pointer", opacity: dx < -10 ? 1 : 0, transition: "opacity 0.15s" }}>Eliminar</button>
+      <div style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: Math.max(W, -dx), display: "flex" }}>{/* la zona roja se estira con el exceso de arrastre; el texto queda anclado */}
+        <button onClick={() => { setDx(0); onDelete(); }} style={{ flex: 1, margin: "10px 0 10px 8px", border: "none", borderRadius: 14, background: T.red, color: "#fff", fontSize: 12.5, fontWeight: 800, cursor: "pointer", opacity: dx < -10 ? 1 : 0, transition: "opacity 0.15s" }}>Eliminar</button>
       </div>
       )}
       <div onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}
         data-swipedelete={disabled ? undefined : "1"}
         onClickCapture={(e) => { if (dx !== 0) { e.stopPropagation(); e.preventDefault(); setDx(0); } }}
-        style={{ transform: dx ? `translateX(${dx}px)` : "none", transition: ref.current.drag ? "none" : "transform 0.2s ease", background: T.card, position: "relative" }}>{/* transform solo si hay desplazamiento: un transform permanente rompe el position:fixed de las hojas de roll/cierre (quedaban recortadas dentro de la fila) */}
+        style={{ transform: dx ? `translateX(${dx}px)` : "none", transition: ref.current.drag ? "none" : "transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.3)", background: T.card, position: "relative" }}>{/* cubic-bezier con sobreimpulso: al soltar, la fila vuelve a su posición con un pequeño rebote. transform solo si hay desplazamiento: un transform permanente rompe el position:fixed de las hojas de roll/cierre (quedaban recortadas dentro de la fila) */}
         {children}
       </div>
     </div>
@@ -1339,43 +1348,76 @@ function RollChainTable({ p }) {
   const openingExp = chain.length > 0 ? chain[0].prevExpiry : p.expiry;
   const stkAfter = (idx) => (idx + 1 < chain.length ? chain[idx + 1].prevStrike : p.strike);
   const expAfter = (idx) => (idx + 1 < chain.length ? chain[idx + 1].prevExpiry : p.expiry);
-  const LegRow = ({ date, action, strike, expiry, perShare, amount, fee, ivr, ret, isBuy, isExp }) => {
+  const LegRow = ({ date, action, actionLabel, strike, expiry, perShare, amount, fee, ivr, delta, bepAfter, ret, isBuy, isExp }) => {
     const legDays = daysBetween(date, expiry);
     return (
-      <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+      <div style={{ display: "grid", gridTemplateColumns: pmcc ? "62px 118px 64px 78px 44px 46px 42px 60px 66px 84px 60px 72px" : "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, alignItems: "center", padding: "8px 10px", borderRadius: 9, background: T.card, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
         <span style={{ fontSize: 12, fontWeight: 700, color: T.sub, whiteSpace: "nowrap" }}>{shortDate(date)}</span>
-        <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{action} {rightLabel}</span>
+        <span style={{ fontSize: 12, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, whiteSpace: "nowrap" }}>{actionLabel || (action + " " + rightLabel)}</span>
         <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{cs ? (csStrikes || "—") : strikeStr(strike) + p.right}</span>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, whiteSpace: "nowrap" }}>{expiry ? shortDate(expiry) : "—"}</span>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(legDays) ? legDays + "d" : "—"}</span>
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{ivr || "—"}</span>
+        {pmcc && <span style={{ fontSize: 11.5, fontWeight: 700, color: delta ? T.ink : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{delta || "—"}</span>}
         <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{fee ? "$" + money2(fee) : "—"}</span>
         <span style={{ fontSize: 12.5, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(perShare))}</span>
         <span style={{ fontSize: 13, fontWeight: 800, color: isExp ? T.sub : isBuy ? T.red : T.green, textAlign: "right", whiteSpace: "nowrap" }}>{isExp ? "$0" : (isBuy ? "-$" : "+$") + money2(Math.abs(amount))}</span>
+        {pmcc && <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textAlign: "right", whiteSpace: "nowrap" }}>{bepAfter != null && isFinite(bepAfter) ? "$" + money2(bepAfter) : "—"}</span>}
         <span style={{ fontSize: 11, fontWeight: 700, color: isFinite(ret) ? (ret >= 0 ? T.green : T.red) : T.sub, textAlign: "right", whiteSpace: "nowrap" }}>{isFinite(ret) ? (ret * 100).toFixed(2) + "%" : "—"}</span>
       </div>
     );
   };
   const rows = [];
+  /* total neto de la cadena: suma con signo de todas las patas mostradas (ventas +, compras −, fees −).
+     En cadenas cerradas es el resultado realizado total; en abiertas, el neto de caja hasta hoy. */
+  let chainTot = 0;
+  const acc = (isBuy, amount, fee, isExp) => { chainTot += (isExp ? 0 : (isBuy ? -Math.abs(amount) : Math.abs(amount))) - (n(fee) || 0); };
   const openAmt = openingPrima * q;
-  rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStk} expiry={openingExp} perShare={openingPrima} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} ret={retOf(openingPrima, openingStk)} isBuy={!shortSide} />);
+  const lg = p.long || {};
+  /* PMCC: el BEP (débito neto/acc) arranca en la prima de la long y va bajando con cada crédito de la
+     short: −crédito inicial, y en cada roll −(newCredit − recompra). Se muestra por línea para ver la
+     erosión del coste. */
+  let bepRun = pmcc ? n(lg.prima) : NaN;
+  if (pmcc) {
+    rows.push(<LegRow key="long" date={p.entryDate} actionLabel="COMPRA LONG" strike={lg.strike} expiry={lg.expiry} perShare={n(lg.prima)} amount={n(lg.prima) * q} fee={n(lg.comision)} delta={lg.delta} bepAfter={bepRun} ret={retOf(-n(lg.prima), lg.strike)} isBuy={true} />);
+    acc(true, n(lg.prima) * q, lg.comision, false);
+    rows.push(<div key="longsep" aria-hidden style={{ borderTop: `1.5px dashed ${T.line}`, margin: "2px 4px 8px" }} />);
+  }
+  if (pmcc) bepRun -= openingPrima;
+  rows.push(<LegRow key="open" date={p.entryDate} action={shortSide ? "VENTA" : "COMPRA"} strike={openingStk} expiry={openingExp} perShare={openingPrima} amount={openAmt} fee={n(p.comision)} ivr={p.ivr} delta={p.delta} bepAfter={pmcc ? bepRun : undefined} ret={retOf(openingPrima, openingStk)} isBuy={!shortSide} />);
+  acc(!shortSide, openAmt, p.comision, false);
   chain.forEach((r, idx) => {
     const buyAmt = n(r.buybackCost) * q, sellAmt = n(r.newCredit) * q;
     rows.push(<LegRow key={"b" + idx} date={r.date} action={shortSide ? "COMPRA" : "VENTA"} strike={r.prevStrike} expiry={r.prevExpiry} perShare={n(r.buybackCost)} amount={buyAmt} fee={n(r.comision)} isBuy={shortSide} />);
-    rows.push(<LegRow key={"s" + idx} date={r.date} action={shortSide ? "VENTA" : "COMPRA"} strike={stkAfter(idx)} expiry={expAfter(idx)} perShare={n(r.newCredit)} amount={sellAmt} ivr={r.ivr} ret={retOf(n(r.newCredit), stkAfter(idx))} isBuy={!shortSide} />);
+    acc(shortSide, buyAmt, r.comision, false);
+    if (pmcc) bepRun -= (n(r.newCredit) - n(r.buybackCost));
+    rows.push(<LegRow key={"s" + idx} date={r.date} action={shortSide ? "VENTA" : "COMPRA"} strike={stkAfter(idx)} expiry={expAfter(idx)} perShare={n(r.newCredit)} amount={sellAmt} ivr={r.ivr} delta={r.delta} bepAfter={pmcc ? bepRun : undefined} ret={retOf(n(r.newCredit), stkAfter(idx))} isBuy={!shortSide} />);
+    acc(!shortSide, sellAmt, 0, false);
     if (r.note) rows.push(<div key={"n" + idx} style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 6px 4px", lineHeight: 1.4 }}>💬 {r.note}</div>);
   });
   if (p.closed) {
     const closeAmt = n(p.closePrice) * q;
     const isExp = n(p.closePrice) === 0;
     rows.push(<LegRow key="close" date={p.closeDate} action={isExp ? "EXPIRA" : (shortSide ? "COMPRA" : "VENTA")} strike={p.strike} expiry={p.expiry} perShare={n(p.closePrice)} amount={closeAmt} fee={n(p.closeComision)} isBuy={shortSide && !isExp} isExp={isExp} />);
+    acc(shortSide, closeAmt, p.closeComision, isExp);
+    if (pmcc && p.closeLongPrice !== "" && p.closeLongPrice != null) {
+      rows.push(<div key="closesep" aria-hidden style={{ borderTop: `1.5px dashed ${T.line}`, margin: "2px 4px 8px" }} />);
+      rows.push(<LegRow key="closelong" date={p.closeDate} actionLabel="VENTA LONG" strike={lg.strike} expiry={lg.expiry} perShare={n(p.closeLongPrice)} amount={n(p.closeLongPrice) * q} fee={n(p.closeLongComision)} isBuy={false} isExp={n(p.closeLongPrice) === 0} />);
+      acc(false, n(p.closeLongPrice) * q, p.closeLongComision, n(p.closeLongPrice) === 0);
+    }
     if (p.closeNote) rows.push(<div key="cn" style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", margin: "0 0 4px 4px", lineHeight: 1.4 }}>💬 {p.closeNote}</div>);
   }
+  rows.push(
+    <div key="chaintot" style={{ display: "flex", justifyContent: "flex-end", alignItems: "baseline", gap: 10, borderTop: `1.5px solid ${T.line}`, marginTop: 2, padding: "8px 10px 2px" }}>
+      <span style={{ fontSize: 10, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>{p.closed ? "Total neto de la cadena" : "Neto de la cadena hasta hoy"}</span>
+      <span style={{ fontSize: 15, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: chainTot >= 0 ? T.green : T.red }}>{signMoney(chainTot)}</span>
+    </div>
+  );
   return (
-    <div style={{ overflowX: "auto", WebkitOverflowScrolling: "touch", margin: "0 -12px", padding: "0 12px" }}>
-      <div style={{ minWidth: 758 }}>{/* 680px de columnas + 54px de gaps + 20px de padding de fila: si no, la última columna (%Strike/%Riesgo) se sale del cuadro */}
-        <div style={{ display: "grid", gridTemplateColumns: "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
-          {["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", retLabel].map((h, i) => (
+    <div style={{ overflowX: "auto", margin: "0 -12px", padding: "0 12px" }}>
+      <div style={{ minWidth: pmcc ? 886 : 758 }}>{/* columnas + gaps + padding; PMCC lleva dos columnas extra (Δ y BEP) */}
+        <div style={{ display: "grid", gridTemplateColumns: pmcc ? "62px 118px 64px 78px 44px 46px 42px 60px 66px 84px 60px 72px" : "62px 104px 64px 78px 44px 46px 60px 66px 84px 72px", gap: 6, padding: "0 10px 4px" }}>
+          {(pmcc ? ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Δ", "Fee", "Prima", "Importe", "BEP", retLabel] : ["Fecha", "Operación", "Strike", "Expiry", "Días", "IVR", "Fee", "Prima", "Importe", retLabel]).map((h, i) => (
             <span key={h} style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, textAlign: i >= 4 ? "right" : "left" }}>{h}</span>
           ))}
         </div>
@@ -1412,10 +1454,11 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
   const [rollCredit, setRollCredit] = useState("");
   const [rollComision, setRollComision] = useState("");
   const [rollIvr, setRollIvr] = useState("");
+  const [rollDelta, setRollDelta] = useState(""); // delta de la nueva short vendida en el roll
   const [rollNote, setRollNote] = useState("");
-  const openRoll = () => { setRollDate(new Date().toISOString().slice(0, 10)); setRollStrike(p.strike || ""); setRollExpiry(""); setRollBuyback(""); setRollCredit(""); setRollComision(""); setRollIvr(""); setRollNote(""); setRolling(true); };
+  const openRoll = () => { setRollDate(new Date().toISOString().slice(0, 10)); setRollStrike(p.strike || ""); setRollExpiry(""); setRollBuyback(""); setRollCredit(""); setRollComision(""); setRollIvr(""); setRollDelta(""); setRollNote(""); setRolling(true); };
   const confirmRoll = () => {
-    onRoll({ date: rollDate, strike: rollStrike, expiry: rollExpiry, buybackCost: rollBuyback, newCredit: rollCredit, comision: rollComision, ivr: rollIvr, note: rollNote });
+    onRoll({ date: rollDate, strike: rollStrike, expiry: rollExpiry, buybackCost: rollBuyback, newCredit: rollCredit, comision: rollComision, ivr: rollIvr, delta: rollDelta, note: rollNote });
     setRolling(false);
   };
   const [closing, setClosing] = useState(false);
@@ -1551,7 +1594,7 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
           )}
           {!cash && <EditSection icon="💲" title="Precios y entrada" />}
           {!cash && (bepAutoStrat(p) || isCreditSpread(p) ? (
-            <EditField label={isPMCC(p) ? "Prima short cobrada $/acc" : isCreditSpread(p) ? "Prima cobrada $/acc" : "Prima por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
+            <EditField label={isPMCC(p) ? "Prima short cobrada $/acc" : isCreditSpread(p) ? "Open price $/acc" : "Prima por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
           ) : (
             <EditField label="BEP" prefix="$" value={p.bep} onChange={onChange("bep")} />
           ))}
@@ -1744,6 +1787,7 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
                 <WizInput label="Nuevo expiry" value={rollExpiry} onChange={setRollExpiry} type="date" />
                 <WizInput label="Nuevo strike" value={rollStrike} onChange={setRollStrike} placeholder="$" inputMode="decimal" />
                 <WizInput label="IVR del roll" value={rollIvr} onChange={setRollIvr} inputMode="numeric" />
+                <WizInput label="Delta nueva short (ej. 0.30)" value={rollDelta} onChange={setRollDelta} inputMode="decimal" />
                 <WizInput label="Prima recompra $/acc" value={rollBuyback} onChange={setRollBuyback} placeholder="$" inputMode="decimal" />
                 <WizInput label="Prima nueva venta $/acc" value={rollCredit} onChange={setRollCredit} placeholder="$" inputMode="decimal" />
                 <WizInput label="Comisión" value={rollComision} onChange={setRollComision} placeholder="$" inputMode="decimal" />
@@ -1770,10 +1814,11 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
         const px = n(closePriceV);
         const shortSide = natOf(p) === "CRED" || isCreditSpread(p);
         /* estimación en vivo del resultado del cierre: opción corta → prima acumulada − recompra; resto → precio venta − BEP.
-           PMCC → resultado de las DOS patas: short (prima acum − recompra) + long (venta − prima pagada). */
+           PMCC → lo que se registrará como evento de cierre: (venta long − coste long − recompra short) × qty.
+           El crédito de la short (y los rolls) ya están registrados en Primas, así que no se suman aquí. */
         const lg = p.long || {};
         const est = pmcc
-          ? ((closePriceV === "" && closeLongPriceV === "") ? NaN : (n(p.prima) - px) * q + (n(closeLongPriceV) - n(lg.prima)) * q)
+          ? ((closePriceV === "" && closeLongPriceV === "") ? NaN : (n(closeLongPriceV) - n(lg.prima) - px) * q)
           : (closePriceV === "" ? NaN : (opt ? (shortSide ? (n(p.prima) - px) * q : (px - n(p.prima)) * q) : (px - effBep(p)) * q));
         return (
           <div onClick={() => setClosing(false)} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
@@ -1782,30 +1827,40 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
               <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 4 }}>
                 <div>
                   <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>✕ Cerrar {p.tkr}</div>
-                  <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>{pmcc ? "Recompra de la short + venta de la long · por acción" : (opt ? "Precio de recompra" : "Precio de venta") + " · por acción" + (opt ? " · la posición queda archivada con su cadena de rolls" : "")}</div>
+                  <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>{pmcc ? "Recompra de la short + venta de la long · por acción" : isCreditSpread(p) ? "Close price (coste de recompra del spread) · por acción" : (opt ? "Precio de recompra" : "Precio de venta") + " · por acción" + (opt ? " · la posición queda archivada con su cadena de rolls" : "")}</div>
                 </div>
                 <button onClick={() => setClosing(false)} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
                 <WizInput label="Fecha de cierre" value={closeDateV} onChange={setCloseDateV} type="date" />
-                <WizInput label={pmcc ? "Recompra short $/acc" : (opt ? "Precio recompra $/acc" : "Precio venta $/acc")} value={closePriceV} onChange={setClosePriceV} placeholder={opt ? "0 si expira sin valor" : "$"} inputMode="decimal" />
-                <WizInput label={pmcc ? "Comisión short" : "Comisión de cierre"} value={closeComisionV} onChange={setCloseComisionV} placeholder="$" inputMode="decimal" />
-                <div style={{ minWidth: 0 }}>
-                  <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>Resultado est.</div>
-                  <div style={{ boxSizing: "border-box", height: 47, display: "flex", alignItems: "center", padding: "0 12px", borderRadius: 12, background: isFinite(est) ? (est >= 0 ? T.tileGreen : T.tileRed) : T.tile }}>
-                    <span style={{ fontSize: 15.5, fontWeight: 800, color: isFinite(est) ? (est >= 0 ? T.green : T.red) : T.sub, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{isFinite(est) ? signMoney(est) : "—"}</span>
-                  </div>
-                </div>
+                {!pmcc && <WizInput label={isCreditSpread(p) ? "Close price $/acc" : (opt ? "Precio recompra $/acc" : "Precio venta $/acc")} value={closePriceV} onChange={setClosePriceV} placeholder={opt ? "0 si expira sin valor" : "$"} inputMode="decimal" />}
+                {!pmcc && <WizInput label="Comisión de cierre" value={closeComisionV} onChange={setCloseComisionV} placeholder="$" inputMode="decimal" />}
                 {pmcc && (
                   <>
+                    <div style={{ gridColumn: "span 2", fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 }}>Short call · recompra</div>
+                    <WizInput label="Recompra short $/acc" value={closePriceV} onChange={setClosePriceV} placeholder="0 si expira sin valor" inputMode="decimal" />
+                    <WizInput label="Comisión short" value={closeComisionV} onChange={setCloseComisionV} placeholder="$" inputMode="decimal" />
+                    <div style={{ gridColumn: "span 2", fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5, marginTop: 2 }}>Long call · venta</div>
                     <WizInput label="Venta long $/acc" value={closeLongPriceV} onChange={setCloseLongPriceV} placeholder="0 si expira sin valor" inputMode="decimal" />
                     <WizInput label="Comisión long" value={closeLongComisionV} onChange={setCloseLongComisionV} placeholder="$" inputMode="decimal" />
                   </>
                 )}
+                <div style={{ minWidth: 0, gridColumn: pmcc ? "span 2" : "auto" }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 5, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{pmcc ? "Resultado del cierre est. · short + long (los rolls previos ya están realizados)" : "Resultado est."}</div>
+                  <div style={{ boxSizing: "border-box", height: 47, display: "flex", alignItems: "center", padding: "0 12px", borderRadius: 12, background: isFinite(est) ? (est >= 0 ? T.tileGreen : T.tileRed) : T.tile }}>
+                    <span style={{ fontSize: 15.5, fontWeight: 800, color: isFinite(est) ? (est >= 0 ? T.green : T.red) : T.sub, whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" }}>{isFinite(est) ? signMoney(est) : "—"}</span>
+                  </div>
+                </div>
                 <div style={{ gridColumn: "span 2" }}>
                   <WizInput label="Comentario (motivo del cierre)" value={closeNoteV} onChange={setCloseNoteV} />
                 </div>
               </div>
+              {opt && (rollChain.length > 0 || pmcc) && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 6 }}>Cadena de la posición</div>
+                  <RollChainTable p={p} />
+                </div>
+              )}
               <button onClick={confirmClose} disabled={!ok} style={{ marginTop: 16, width: "100%", background: ok ? T.red : T.tile, border: "none", borderRadius: 14, padding: "15px 0", fontSize: 15, fontWeight: 800, color: ok ? "#fff" : T.sub, cursor: "pointer" }}>Confirmar cierre</button>
             </div>
           </div>
@@ -1962,38 +2017,86 @@ function MovimientosView({ positions, reopenPos }) {
            del PMCC) no se registra hasta que se cierra, igual que las acciones. */
         const fee = n(p.comision);
         const cash = openingPrimaPerShare(p) * qty - fee;
-        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: n(openingStrike(p)) - n(openingPrimaPerShare(p)) });
+        primaEvents.push({ id: p.id + "-open", posId: p.id, date: p.entryDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Apertura", cash, fee, strike: openingStrike(p), right: p.right, qty: qtyLabelOf(p), expiry: openingExpiry(p), bep: n(openingStrike(p)) - n(openingPrimaPerShare(p)), legs: [
+          { side: "V", label: strikeStr(openingStrike(p)) + (p.right || "") + (openingExpiry(p) ? " " + ibkrDate(openingExpiry(p)) : ""), perShare: openingPrimaPerShare(p), cash: openingPrimaPerShare(p) * qty },
+        ] });
       }
       chain.forEach((r, idx) => {
         const fee = n(r.comision);
         const cashRoll = (n(r.newCredit) - n(r.buybackCost)) * qty - fee;
-        primaEvents.push({ id: p.id + "-roll" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: cashRoll, fee, strike: strikeAfterRoll(p, idx), right: p.right, prevStrike: r.prevStrike, qty: qtyLabelOf(p), expiry: expiryAfterRoll(p, idx), note: r.note || "" });
+        primaEvents.push({ id: p.id + "-roll" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: cashRoll, fee, strike: strikeAfterRoll(p, idx), right: p.right, prevStrike: r.prevStrike, qty: qtyLabelOf(p), expiry: expiryAfterRoll(p, idx), note: r.note || "", legs: [
+          { side: "C", label: strikeStr(r.prevStrike) + (p.right || "") + (r.prevExpiry ? " " + ibkrDate(r.prevExpiry) : ""), perShare: -n(r.buybackCost), cash: -n(r.buybackCost) * qty },
+          { side: "V", label: strikeStr(strikeAfterRoll(p, idx)) + (p.right || "") + (expiryAfterRoll(p, idx) ? " " + ibkrDate(expiryAfterRoll(p, idx)) : ""), perShare: n(r.newCredit), cash: n(r.newCredit) * qty },
+        ] });
         const legBefore = idx === 0 ? openingPrimaPerShare(p) : n(chain[idx - 1].newCredit);
         const realized = dirSign(p) * (n(r.buybackCost) - legBefore) * qty - fee;
-        mtmEvents.push({ id: p.id + "-rollmtm" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: realized, fee, strike: r.prevStrike, right: p.right, qty: qtyLabelOf(p), expiry: r.prevExpiry, note: r.note || "" });
+        mtmEvents.push({ id: p.id + "-rollmtm" + idx, posId: p.id, date: r.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Roll", cash: realized, fee, strike: r.prevStrike, right: p.right, qty: qtyLabelOf(p), expiry: r.prevExpiry, note: r.note || "", legs: [
+          { side: "V", label: strikeStr(r.prevStrike) + (p.right || "") + (r.prevExpiry ? " " + ibkrDate(r.prevExpiry) : ""), perShare: legBefore, cash: legBefore * qty },
+          { side: "C", label: strikeStr(r.prevStrike) + (p.right || ""), perShare: -n(r.buybackCost), cash: -n(r.buybackCost) * qty },
+        ] });
       });
-      if (p.closed && p.closePrice !== "" && p.closePrice != null) {
+      if (p.closed && p.closePrice !== "" && p.closePrice != null && !isPMCC(p)) {
         const fee = n(p.closeComision);
+        const isExpira = n(p.closePrice) === 0;
+        const shortP = dirSign(p) === -1;
+        const stkLbl = isCreditSpread(p) ? ([p.putSpread, p.callSpread].filter(Boolean).join(" · ") || "") : strikeStr(p.strike) + (p.right || "");
+        const expLbl = p.expiry ? " " + ibkrDate(p.expiry) : "";
         /* credit spreads (Iron Condor / Broken Wings): la prima cobrada NO se registró al abrir, así que
            el cierre materializa el NETO = (prima cobrada − recompra) × qty − fee, como un MTM. Si solo se
            registrara la recompra (pago), Primas quedaría en negativo sin el crédito que la compensa. */
         const cashClose = isCreditSpread(p)
           ? (n(p.prima) - n(p.closePrice)) * qty - fee
           : dirSign(p) * n(p.closePrice) * qty - fee;
-        primaEvents.push({ id: p.id + "-close", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: n(p.closePrice) === 0 ? "Expirada" : "Cierre", cash: cashClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: (isCreditSpread(p) ? "Neto prima − recompra" + (p.closeNote ? " · " : "") : "") + (p.closeNote || "") });
+        const primaLegs = isCreditSpread(p)
+          ? [
+              { side: "V", label: stkLbl + expLbl, perShare: n(p.prima), cash: n(p.prima) * qty },
+              { side: "C", label: stkLbl, perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
+            ]
+          : isExpira
+            ? [{ side: null, label: stkLbl + expLbl + " · expira", perShare: 0, cash: 0 }]
+            : [{ side: shortP ? "C" : "V", label: stkLbl + expLbl, perShare: dirSign(p) * n(p.closePrice), cash: dirSign(p) * n(p.closePrice) * qty }];
+        primaEvents.push({ id: p.id + "-close", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: isExpira ? "Expirada" : "Cierre", cash: cashClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "", legs: primaLegs });
         const legEntry = chain.length > 0 ? n(chain[chain.length - 1].newCredit) : openingPrimaPerShare(p);
         const realizedClose = dirSign(p) * (n(p.closePrice) - legEntry) * qty - fee;
-        mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: n(p.closePrice) === 0 ? "Expirada" : "Cierre", cash: realizedClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "" });
+        const mtmLegs = isCreditSpread(p)
+          ? primaLegs
+          : shortP
+            ? [
+                { side: "V", label: stkLbl + expLbl, perShare: legEntry, cash: legEntry * qty },
+                { side: "C", label: stkLbl + (isExpira ? " · expira" : ""), perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
+              ]
+            : [
+                { side: "C", label: stkLbl + expLbl, perShare: -legEntry, cash: -legEntry * qty },
+                { side: "V", label: stkLbl, perShare: n(p.closePrice), cash: n(p.closePrice) * qty },
+              ];
+        mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: isExpira ? "Expirada" : "Cierre", cash: realizedClose, fee, strike: p.strike, right: p.right, qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "", legs: mtmLegs });
       }
-      /* PMCC: la pata LARGA (call comprada, débito) no se registró al abrir. Al cerrar el PMCC, si se indica
-         el precio de venta de la long, se registra su cash (venta) en Primas y su resultado realizado en MTM. */
-      if (isPMCC(p) && p.closed && p.closeLongPrice !== "" && p.closeLongPrice != null) {
+      /* PMCC — CIERRE (modelo acordado):
+         · PRIMAS: UN evento combinado = (venta long − coste long − recompra short) × qty − comisiones.
+           Total Primas de la estrategia = crédito apertura + rolls + cierre = profit real.
+         · MTM: DOS eventos, el realizado POR PATA — short: (prima vigente − recompra) × qty − fee;
+           long: (venta − coste) × qty − fee. Suman lo mismo que el combinado de Primas + crédito ya
+           registrado, y permiten ver qué aportó cada pata. */
+      if (isPMCC(p) && p.closed && p.closePrice !== "" && p.closePrice != null && p.closeLongPrice !== "" && p.closeLongPrice != null) {
         const lg = p.long || {};
-        const lgFee = n(p.closeLongComision);
-        const cashLong = n(p.closeLongPrice) * qty - lgFee;
-        primaEvents.push({ id: p.id + "-longclose", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre long", cash: cashLong, fee: lgFee, strike: lg.strike, right: "C", qty: qtyLabelOf(p), expiry: lg.expiry, bep: n(lg.prima), note: "Pata larga · " + (p.closeNote || "") });
-        const realizedLong = (n(p.closeLongPrice) - n(lg.prima)) * qty - lgFee;
-        mtmEvents.push({ id: p.id + "-longclosemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre long", cash: realizedLong, fee: lgFee, strike: lg.strike, right: "C", qty: qtyLabelOf(p), expiry: lg.expiry, bep: n(lg.prima), note: "Pata larga · " + (p.closeNote || "") });
+        const fees = n(p.closeComision) + n(p.closeLongComision);
+        const combined = (n(p.closeLongPrice) - n(lg.prima) - n(p.closePrice)) * qty - fees;
+        primaEvents.push({ id: p.id + "-close", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre PMCC", cash: combined, fee: fees, strike: p.strike, right: "C", qty: qtyLabelOf(p), expiry: p.expiry, bep: n(effBep(p)), note: p.closeNote || "", legs: [
+          { side: "C", label: strikeStr(lg.strike) + "C · long", perShare: -n(lg.prima), cash: -n(lg.prima) * qty },
+          { side: "C", label: strikeStr(p.strike) + "C" + (p.expiry ? " " + ibkrDate(p.expiry) : "") + " · short", perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
+          { side: "V", label: strikeStr(lg.strike) + "C" + (lg.expiry ? " " + ibkrDate(lg.expiry) : "") + " · long", perShare: n(p.closeLongPrice), cash: n(p.closeLongPrice) * qty },
+        ] });
+        const shortLegEntry = chain.length > 0 ? n(chain[chain.length - 1].newCredit) : openingPrimaPerShare(p);
+        const realizedShort = (shortLegEntry - n(p.closePrice)) * qty - n(p.closeComision);
+        mtmEvents.push({ id: p.id + "-closemtm-s", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre short", cash: realizedShort, fee: n(p.closeComision), strike: p.strike, right: "C", qty: qtyLabelOf(p), expiry: p.expiry, note: p.closeNote || "", legs: [
+          { side: "V", label: strikeStr(p.strike) + "C" + (p.expiry ? " " + ibkrDate(p.expiry) : ""), perShare: shortLegEntry, cash: shortLegEntry * qty },
+          { side: "C", label: strikeStr(p.strike) + "C", perShare: -n(p.closePrice), cash: -n(p.closePrice) * qty },
+        ] });
+        const realizedLong = (n(p.closeLongPrice) - n(lg.prima)) * qty - n(p.closeLongComision);
+        mtmEvents.push({ id: p.id + "-closemtm-l", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre long", cash: realizedLong, fee: n(p.closeLongComision), strike: lg.strike, right: "C", qty: qtyLabelOf(p), expiry: lg.expiry, note: p.closeNote || "", legs: [
+          { side: "C", label: strikeStr(lg.strike) + "C" + (lg.expiry ? " " + ibkrDate(lg.expiry) : ""), perShare: -n(lg.prima), cash: -n(lg.prima) * qty },
+          { side: "V", label: strikeStr(lg.strike) + "C", perShare: n(p.closeLongPrice), cash: n(p.closeLongPrice) * qty },
+        ] });
       }
     } else if ((natOf(p) === "ACC" || natOf(p) === "COLLAR") && p.closed && p.closePrice !== "" && p.closePrice != null) {
       const fee = n(p.closeComision);
@@ -2027,15 +2130,16 @@ function MovimientosView({ positions, reopenPos }) {
   const monthLabel = (key) => { if (key === "sin-fecha") return "Sin fecha"; const [y, m] = key.split("-"); return MESES[Number(m) - 1] + " " + y; };
 
   /* ---------- Estrategias: todas las posiciones archivadas por tipo ---------- */
-  const STRAT_CATS = ["Acciones", "Covered Calls", "Short Puts", "Long Calls", "PMCC", "Iron Condor", "DC/DD", "Otras"];
+  const STRAT_CATS = ["Acciones", "Covered Calls", "Short Puts", "Long Calls", "PMCC", "Diagonal", "Iron Condor", "DC/DD", "Otras"];
   const categoryOf = (p) => {
     const t = (p.tipo || "").toLowerCase();
     if (isCashNat(p)) return null; // cash no es una estrategia
     if (natOf(p) === "ACC") return "Acciones";
     if (t === "pmcc") return "PMCC";
+    if (t === "diagonal") return "Diagonal";
     if (isLongCallPos(p)) return "Long Calls";
     if (t === "iron condor") return "Iron Condor";
-    if (["dc", "dd", "diagonal", "calendar"].includes(t)) return "DC/DD";
+    if (["dc", "dd", "calendar"].includes(t)) return "DC/DD";
     if (t === "short put") return "Short Puts";
     if (t === "short call") return "Covered Calls";
     /* cualquier opción corta (nat Crédito) de CUALQUIER bloque cae en su estrategia por el right,
@@ -2095,23 +2199,23 @@ function MovimientosView({ positions, reopenPos }) {
             const yCollapsed = !openYears.has(y);
             return (
             <div key={y} style={{ marginTop: 10 }}>
-              <div onClick={() => toggleYear(y)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", background: T.dark, borderRadius: 12, padding: "10px 10px 10px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+              <div onClick={() => toggleYear(y)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", background: T.dark, borderRadius: 12, padding: "10px 0 10px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
                 <span style={{ fontSize: 13, fontWeight: 800, color: "#fff", textTransform: "uppercase", letterSpacing: 0.5 }}>
                   {y === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + y}
                 </span>
-                <span style={{ fontSize: 12, fontWeight: 800, color: "#C4CCD4", textAlign: "right", paddingRight: 10 }}>${money2(yearTotals[y].fees)}</span>
-                <span style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 10 }}>{signMoney(yearTotals[y].total)}</span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: "#C4CCD4", textAlign: "right", paddingRight: 8 }}>${money2(yearTotals[y].fees)}</span>
+                <span style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 8, paddingRight: 10 }}>{signMoney(yearTotals[y].total)}</span>
               </div>
               {!yCollapsed && monthsOfYear(y).map((key) => {
             const isCollapsed = !openMonths.has(key);
             return (
             <div key={key} style={{ marginTop: 4 }}>
-              <div onClick={() => toggleMonth(key)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 10px 8px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
+              <div onClick={() => toggleMonth(key)} style={{ display: "grid", gridTemplateColumns: "1fr 76px 100px", gap: 0, alignItems: "center", margin: "10px 0 4px", background: T.tile, borderRadius: 10, padding: "8px 0 8px 12px", fontVariantNumeric: "tabular-nums", cursor: "pointer" }}>
                 <span style={{ fontSize: 12, fontWeight: 800, color: T.ink, textTransform: "uppercase", letterSpacing: 0.5 }}>
                   {key === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + monthLabel(key)}
                 </span>
-                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 10 }}>${money2(monthGroups[key].fees)}</span>
-                <span style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 10 }}>{signMoney(monthGroups[key].total)}</span>
+                <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(monthGroups[key].fees)}</span>
+                <span style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>{signMoney(monthGroups[key].total)}</span>
               </div>
               {!isCollapsed && monthGroups[key].items.map((e) => {
                 const blk = BLOCKS.find((b) => b.id === e.block);
@@ -2128,11 +2232,35 @@ function MovimientosView({ positions, reopenPos }) {
                       <div style={{ marginBottom: 9, background: T.tile, borderRadius: 10, padding: "9px 11px" }}>
                         <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700 }}>
                           {(() => { const b = BLOCKS.find((x) => x.id === e.block); return b ? <span style={{ color: b.color, fontWeight: 800 }}>{b.name.replace("Bloque ", "B")}</span> : null; })()}
-                          {e.kind === "Roll" ? " · Roll" : ""}
+                          {e.kind === "Roll" ? " · Roll" : e.kind && e.kind !== "Apertura" && e.kind !== "Cierre" ? " · " + e.kind : ""}
                           {e.qty ? " · x " + e.qty : ""}
                           {e.strike !== "" && e.strike != null ? " " + strikeStr(e.strike) + (e.right || "") : ""}
                           {e.expiry ? " " + ibkrDate(e.expiry) : ""}
                         </div>
+                        {/* desglose por patas: chip VENTA/COMPRA, strike + expiry, prima $/acc e importe.
+                           Disponible en aperturas, rolls y cierres, tanto en Primas como en MTM. */}
+                        {Array.isArray(e.legs) && e.legs.length > 0 && (
+                          <div style={{ marginTop: 7, borderTop: `1px dashed ${T.line}`, paddingTop: 7 }}>
+                            {e.legs.map((l, i) => (
+                              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "3px 0", fontVariantNumeric: "tabular-nums" }}>
+                                <span style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                                  {l.side && (
+                                    <span style={{ flexShrink: 0, fontSize: 9, fontWeight: 800, letterSpacing: 0.4, color: "#fff", background: l.side === "V" ? T.green : T.red, borderRadius: 6, padding: "2px 6px" }}>{l.side === "V" ? "VENTA" : "COMPRA"}</span>
+                                  )}
+                                  <span style={{ fontSize: 11.5, fontWeight: 700, color: T.ink, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l.label}</span>
+                                  <span style={{ flexShrink: 0, fontSize: 11, fontWeight: 700, color: l.perShare >= 0 ? T.green : T.red, whiteSpace: "nowrap" }}>{(l.perShare >= 0 ? "+" : "-") + "$" + money2(Math.abs(l.perShare))}</span>
+                                </span>
+                                <span style={{ flexShrink: 0, fontSize: 12, fontWeight: 800, color: l.cash >= 0 ? T.green : T.red, whiteSpace: "nowrap" }}>{signMoney(l.cash)}</span>
+                              </div>
+                            ))}
+                            {n(e.fee) > 0 && (
+                              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, padding: "3px 0", fontVariantNumeric: "tabular-nums" }}>
+                                <span style={{ fontSize: 11.5, fontWeight: 600, color: T.sub }}>Comisión</span>
+                                <span style={{ fontSize: 12, fontWeight: 800, color: T.red, whiteSpace: "nowrap" }}>-${money2(e.fee)}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         {e.note ? <div style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", marginTop: 5, lineHeight: 1.4 }}>💬 {e.note}</div> : null}
                       </div>
                     )}
@@ -2204,6 +2332,10 @@ function MovimientosView({ positions, reopenPos }) {
                contendría el cash de esa única pata de cierre (venta o recompra), sin netear contra el coste/
                crédito de apertura — daría un profit engañoso. Para esos casos, una vez cerrada, se usa el
                resultado realizado (MTM), que sí neta correctamente contra la apertura original. */
+            /* noOpenBooked: estrategias cuyo débito de apertura NO se registró en Primas y cuyo cierre NO
+               materializa el neto completo (Long Call, credit spreads) → cerradas usan el realizado MTM.
+               El PMCC NO está aquí: su cierre combinado (venta long − coste long − recompra short) hace que
+               la suma de Primas (crédito apertura + rolls + cierre) sea exactamente el profit total. */
             const noOpenBooked = isLongCallPos(p) || isCreditSpread(p);
             const primaBasis = noOpenBooked && p.closed ? mtmSumOf(p) : primaSum;
             /* credit spread ABIERTO: no hay nada registrado (por diseño), pero sí se puede mostrar el
@@ -2810,6 +2942,9 @@ function App() {
     try { const a = localStorage.getItem(KEY_ACC); if (a) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
     try { const p = localStorage.getItem(KEY_POS); if (p) { setPositions(withNat(JSON.parse(p))); havePos = true; } } catch (e) {}
     try { const k = localStorage.getItem(KEY_FINNHUB); if (k) setApiKey(k); } catch (e) {}
+    /* al abrir la app, ofrecer siempre actualizar precios: si hay API key guardada se abre directamente
+       la hoja de "Actualizar precios / Cambiar key". Sin key no se molesta (primer uso). */
+    try { if (localStorage.getItem(KEY_FINNHUB)) setRefreshChoiceOpen(true); } catch (e) {}
     try { const gk = localStorage.getItem(KEY_GEMINI); if (gk) setGeminiKey(gk); } catch (e) {}
     try { const s = localStorage.getItem(KEY_SNAP); if (s) setSnapshots(JSON.parse(s)); } catch (e) {}
     try { const bk = localStorage.getItem(KEY_BROKERS); if (bk) { const arr = JSON.parse(bk); if (Array.isArray(arr) && arr.length) setBrokers(arr); } } catch (e) {}
@@ -3125,7 +3260,7 @@ function App() {
     const isLongCall = nat === "DEF" && wizStrat === "Long Call";
     /* PMCC: la pata CORTA es la posición principal (nat=CRED, right=C) y se rola/registra como short call.
        La pata LARGA se guarda en p.long. BEP = prima long − prima short; riesgo = ese débito neto × qty. */
-    const isPMCCw = wizStrat === "PMCC";
+    const isPMCCw = wizStrat === "PMCC" || wizStrat === "Diagonal"; // Diagonal = PMCC con long más corta
     const effNat = isPMCCw ? "CRED" : nat;
     const right = effNat === "CRED" ? ((wizStrat || "").toLowerCase().includes("call") || isPMCCw ? "C" : "P") : (isLongCall ? "C" : (f.right || "P"));
     const cts = parseFloat(String(f.contratos || "").replace(",", "."));
@@ -3154,7 +3289,8 @@ function App() {
       entryDate: f.entryDate || "", rollChain: [],
       covered: effNat === "CRED" && right === "C" && !isPMCCw,
       coveredBy: ((effNat === "CRED" && right === "C" && !isPMCCw) || nat === "COLLAR") ? (f.coveredStockId || "") : "",
-      long: isPMCCw ? { strike: f.lgStrike || "", expiry: f.lgExpiry || "", prima: isFinite(pmLongPS) ? String(pmLongPS) : "", comision: f.lgComision || "" } : undefined,
+      long: isPMCCw ? { strike: f.lgStrike || "", expiry: f.lgExpiry || "", prima: isFinite(pmLongPS) ? String(pmLongPS) : "", comision: f.lgComision || "", delta: f.lgDelta || "" } : undefined,
+      delta: f.delta || "",
       putSpread: CREDIT_SPREAD_STRATS.has(wizStrat) ? (f.putSpread || "") : "",
       callSpread: wizStrat === "Iron Condor" ? (f.callSpread || "") : "",
       closed: false, closeDate: "", closePrice: "", closeComision: "", closeNote: "", closeLongPrice: "", closeLongComision: "",
@@ -3645,6 +3781,7 @@ function App() {
         input[type=date]::-webkit-date-and-time-value{text-align:left;}
         .no-scrollbar{scrollbar-width:none;-ms-overflow-style:none;}
         .no-scrollbar::-webkit-scrollbar{display:none;width:0;height:0;}
+        button{-webkit-appearance:none;appearance:none;}
         *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
         @keyframes pullSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       `}</style>
@@ -3677,17 +3814,19 @@ function App() {
         )}
         {refreshMsg && <div style={{ fontSize: 12, color: T.green, fontWeight: 700, marginBottom: 12, background: T.tileGreen, borderRadius: 12, padding: "8px 12px" }}>{refreshMsg}</div>}
 
-        {/* SELECTOR BROKER — oculto también en Vencimientos: esa vista no muestra nada del estado de cuenta */}
+        {/* SELECTOR BROKER — oculto también en Vencimientos: esa vista no muestra nada del estado de cuenta.
+           Chips sueltos al estilo del resto del rediseño (como el selector de Distribución y las pestañas de
+           bloques): fondo claro, activo en tinta oscura — fuera la barra negra maciza de antes. */}
         {view !== "movimientos" && view !== "ajustes" && view !== "vencimientos" && (
-        <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "stretch" }}>
-          <div style={{ background: T.dark, borderRadius: 18, padding: 6, display: "flex", gap: 6, flex: 1, overflowX: "auto" }}>
-            {(brokers.length > 1 ? ["Todos", ...brokers] : brokers).map((b) => (
-              <button key={b} onClick={() => setBroker(b)} style={{
-                flex: "1 0 auto", border: "none", cursor: "pointer", borderRadius: 13, padding: "10px 14px", fontSize: 14, fontWeight: 700, whiteSpace: "nowrap",
-                background: broker === b ? "#fff" : "transparent", color: broker === b ? T.dark : "#C4CCD4",
-              }}>{b}</button>
-            ))}
-          </div>
+        <div className="no-scrollbar" style={{ display: "flex", gap: 8, marginBottom: 16, overflowX: "auto" }}>
+          {(brokers.length > 1 ? ["Todos", ...brokers] : brokers).map((b) => (
+            <button key={b} onClick={() => setBroker(b)} style={{
+              flex: "1 0 auto", border: "none", cursor: "pointer", borderRadius: 20, padding: "10px 18px", fontSize: 13.5, fontWeight: 700, whiteSpace: "nowrap",
+              background: broker === b ? T.dark : T.card, color: broker === b ? "#fff" : T.ink,
+              boxShadow: broker === b ? "0 4px 14px rgba(24,22,26,0.25)" : "0 1px 4px rgba(24,22,26,0.06)",
+              transition: "background 0.15s, color 0.15s, box-shadow 0.15s",
+            }}>{b}</button>
+          ))}
         </div>
         )}
 
@@ -3951,7 +4090,7 @@ function App() {
               <input type="text" value={newBrokerName} onChange={(e) => setNewBrokerName(e.target.value)} placeholder="Ej. TASTYTRADE"
                 onKeyDown={(e) => { if (e.key === "Enter") addBroker(); }}
                 style={{ flex: 1, minWidth: 0, boxSizing: "border-box", background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 12, padding: "11px 12px", fontSize: 14, fontWeight: 700, color: T.ink, outline: "none", textTransform: "uppercase" }} />
-              <button onClick={addBroker} disabled={!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())} style={{ flexShrink: 0, background: (!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())) ? T.tile : T.green, border: "none", borderRadius: 12, padding: "0 18px", fontSize: 14, fontWeight: 800, color: (!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())) ? T.sub : "#fff", cursor: "pointer" }}>Añadir</button>
+              <button onClick={addBroker} disabled={!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())} style={{ WebkitAppearance: "none", appearance: "none", flexShrink: 0, background: (!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())) ? T.tile : T.green, border: "none", borderRadius: 12, padding: "0 18px", fontSize: 14, fontWeight: 800, color: (!newBrokerName.trim() || brokers.includes(newBrokerName.trim().toUpperCase())) ? T.sub : "#fff", cursor: "pointer" }}>Añadir</button>
             </div>
             {newBrokerName.trim() && brokers.includes(newBrokerName.trim().toUpperCase()) && <div style={{ fontSize: 11.5, color: T.red, fontWeight: 700, marginTop: 6 }}>Ese broker ya existe.</div>}
 
@@ -4339,7 +4478,7 @@ function App() {
                     </div>
                   </>
                 )}
-                {wizNat === "DEF" && wizStrat !== "Long Call" && wizStrat !== "PMCC" && !CREDIT_SPREAD_STRATS.has(wizStrat) && (
+                {wizNat === "DEF" && wizStrat !== "Long Call" && wizStrat !== "PMCC" && wizStrat !== "Diagonal" && !CREDIT_SPREAD_STRATS.has(wizStrat) && (
                   <>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <WizInput label="Vencimiento" value={wizForm.expiry} onChange={wizF("expiry")} type="date" />
@@ -4371,7 +4510,7 @@ function App() {
                       <WizInput label={"Spread " + (wizStrat === "Call Broken Wing" ? "call" : "put") + " (ej. 760/765)"} value={wizForm.putSpread} onChange={wizF("putSpread")} placeholder="760/765" />
                     )}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                      <WizInput label="Prima cobrada $/acc" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" />
+                      <WizInput label="Open price $/acc · crédito cobrado" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" />
                       <WizInput label="Riesgo máximo $" value={wizForm.margen} onChange={wizF("margen")} inputMode="decimal" />
                     </div>
                     {(() => {
@@ -4407,7 +4546,7 @@ function App() {
                     <WizInput label="Fecha de entrada" value={wizForm.entryDate} onChange={wizF("entryDate")} type="date" />
                   </>
                 )}
-                {wizNat === "DEF" && wizStrat === "PMCC" && (
+                {wizNat === "DEF" && (wizStrat === "PMCC" || wizStrat === "Diagonal") && (
                   <>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 2, marginBottom: 2 }}>
                       <span style={{ fontSize: 10.5, fontWeight: 800, color: T.green, textTransform: "uppercase", letterSpacing: 0.5 }}>▸ Long leg · call comprada</span>
@@ -4421,7 +4560,10 @@ function App() {
                       <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
                       <WizInput label="Prima pagada $/acc" value={wizForm.lgPrima} onChange={wizF("lgPrima")} inputMode="decimal" />
                     </div>
-                    <WizInput label="Comisión de entrada" value={wizForm.lgComision} onChange={wizF("lgComision")} placeholder="$" inputMode="decimal" />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Delta long (ej. 0.80)" value={wizForm.lgDelta} onChange={wizF("lgDelta")} inputMode="decimal" />
+                      <WizInput label="Comisión de entrada" value={wizForm.lgComision} onChange={wizF("lgComision")} placeholder="$" inputMode="decimal" />
+                    </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, marginBottom: 2 }}>
                       <span style={{ fontSize: 10.5, fontWeight: 800, color: T.red, textTransform: "uppercase", letterSpacing: 0.5 }}>▸ Short leg · call vendida</span>
                       <div style={{ flex: 1, height: 1, background: T.line }} />
@@ -4434,7 +4576,10 @@ function App() {
                       <WizInput label="Prima cobrada" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" />
                       <WizInput label="IVR" value={wizForm.ivr} onChange={wizF("ivr")} inputMode="numeric" />
                     </div>
-                    <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                      <WizInput label="Delta short (ej. 0.30)" value={wizForm.delta} onChange={wizF("delta")} inputMode="decimal" />
+                      <WizInput label="Comisión de entrada" value={wizForm.comision} onChange={wizF("comision")} placeholder="$" inputMode="decimal" />
+                    </div>
                     {(() => {
                       /* PMCC: BEP = prima long pagada − prima short cobrada (débito neto por acción).
                          Riesgo = ese débito neto × contratos × 100 (mín. 0). Los rolls de la short bajarán el BEP. */
