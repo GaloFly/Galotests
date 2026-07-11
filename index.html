@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.35";
+const APP_VERSION = "5.37";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -2033,8 +2033,8 @@ function DividendsEditor({ p, onSave, onClose }) {
               <span style={{ fontSize: 11.5, fontWeight: 800, color: net(d) >= 0 ? T.green : T.red }}>{signMoney(net(d))} neto</span>
               {divs.length > 1 && <button onClick={() => delDiv(i)} style={{ background: "transparent", border: "none", fontSize: 11.5, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar</button>}
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1fr", gap: 8 }}>
-              <WizInput label="Fecha" value={d.date} onChange={setDivF(i, "date")} type="date" />
+            <div style={{ marginBottom: 8 }}><WizInput label="Fecha" value={d.date} onChange={setDivF(i, "date")} type="date" /></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
               <WizInput label="Importe $" value={d.amount} onChange={setDivF(i, "amount")} placeholder="$" inputMode="decimal" />
               <WizInput label="Comisión $" value={d.fee} onChange={setDivF(i, "fee")} placeholder="$" inputMode="decimal" />
             </div>
@@ -3911,7 +3911,6 @@ function App() {
   const [flows, setFlows] = useState([]);
   const [autoBackups, setAutoBackups] = useState([]);
   const [updateNotice, setUpdateNotice] = useState(null);
-  const [loadDiag, setLoadDiag] = useState(null); // v5.33: diagnóstico de carga (nº posiciones en cada almacén)
   const [confirmAutoBk, setConfirmAutoBk] = useState(null);
   const [manualBackups, setManualBackups] = useState([]); // copias JSON guardadas por el usuario (restaurables)
   const [confirmManualBk, setConfirmManualBk] = useState(null);
@@ -4000,7 +3999,6 @@ function App() {
         } else {
           finalPos = idbPos || lsPos;
         }
-        setLoadDiag({ ls: lsPos ? lsPos.length : 0, idb: idbPos ? idbPos.length : 0, merged: finalPos ? finalPos.length : 0 });
         if (finalPos) { setPositions(withNat(finalPos)); havePos = true; }
       } catch (e) {}
       try { const tr = await idbGet(KEY_TRADES); if (tr != null) { const arr = JSON.parse(tr); if (Array.isArray(arr)) { setTrades(arr); haveTr = true; } } } catch (e) {}
@@ -4122,7 +4120,7 @@ function App() {
     if (!json) return;
     const entry = { ts: Date.now(), appVersion: APP_VERSION, json };
     setManualBackups((prev) => {
-      const next = [entry, ...prev].slice(0, 8);
+      const next = [entry, ...prev].slice(0, 3);
       try { idbSet(KEY_MANUALBK, JSON.stringify(next)); } catch (e) {}
       try { localStorage.setItem(KEY_MANUALBK, JSON.stringify(next)); } catch (e) {}
       return next;
@@ -5144,7 +5142,6 @@ function App() {
         {updateNotice && (
           <div style={{ background: T.tileGreen, borderRadius: 14, padding: "10px 12px", marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700, lineHeight: 1.45 }}>App actualizada a v{updateNotice.to} (antes {updateNotice.from}). Se guardó una copia automática de tus datos por seguridad{updateNotice.count != null ? " (" + updateNotice.count + " posiciones)" : ""}.</div>
-            {loadDiag && <div style={{ fontSize: 11, color: T.sub, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>Diagnóstico: localStorage {loadDiag.ls} · IndexedDB {loadDiag.idb} · fusión {loadDiag.merged} · en pantalla {positions.length} posiciones</div>}
             <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, lineHeight: 1.45, marginTop: 3 }}>Si tras la actualización algo no cuadra o faltan datos, restaura la copia desde Backup → Copias automáticas.</div>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button onClick={() => { setUpdateNotice(null); openBackup(); }} style={{ background: T.dark, border: "none", borderRadius: 10, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "#fff", cursor: "pointer" }}>Ver copias</button>
@@ -5465,7 +5462,7 @@ function App() {
               <button onClick={() => setBackupOpen(false)} aria-label="Cerrar" style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
             </div>
             <div style={{ padding: "0 20px 20px" }}>
-            <div style={{ fontSize: 14, color: T.sub, lineHeight: 1.5, marginBottom: 14 }}>Lo más cómodo entre dispositivos: <b style={{ color: T.ink }}>Descargar archivo</b> (lo comparte por AirDrop / Mensajes o lo guarda en Archivos) y en el otro móvil <b style={{ color: T.ink }}>Importar archivo</b>. También puedes copiar/pegar el texto de abajo a mano. Backup único de toda la app: brokers, posiciones, cash y margen de cada broker, snapshots, aportaciones, operaciones del Comparador y tu API key.</div>
+            <div style={{ fontSize: 13.5, color: T.sub, lineHeight: 1.5, marginBottom: 14 }}>Entre dispositivos: <b style={{ color: T.ink }}>Descargar archivo</b> y en el otro móvil <b style={{ color: T.ink }}>Importar archivo</b>. Guarda toda la app (posiciones, brokers, cuentas, snapshots y tu API key).</div>
             <input id="backup-file-input" type="file" accept="application/json,.json" onChange={importBackupFile} style={{ display: "none" }} />
             <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
               <button onClick={downloadBackup} style={{ flex: 1, background: T.dark, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 700, color: "#fff", cursor: "pointer" }}>⬇︎ Descargar archivo</button>
@@ -5501,7 +5498,7 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Restaurar una copia sobrescribe los datos actuales con los de esa versión y recarga la app. Se guardan las 3 últimas.</div>
+                <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Restaurar sobrescribe los datos actuales y recarga. Se guardan las 3 últimas.</div>
               </div>
             )}
             {manualBackups.length > 0 && (
@@ -5518,7 +5515,7 @@ function App() {
                     </div>
                   ))}
                 </div>
-                <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Cada vez que copias o descargas un backup se guarda aquí un punto de restauración con su fecha y hora. Se conservan los 8 últimos.</div>
+                <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Punto de restauración cada vez que copias o descargas. Se conservan las 3 últimas.</div>
               </div>
             )}
             <div style={{ textAlign: "center", marginTop: 12 }}>
@@ -5591,7 +5588,7 @@ function App() {
               </div>
               <div style={{ display: "grid", gap: 8 }}>
                 {!p.closed && nat === "ACC" && <ActionBtn icon="📦" label="Lotes" sub="Ver lotes por fecha · editar · vender · añadir" color={T.purple} onClick={() => sheetDo("lotes")} />}
-                {nat === "ACC" && <ActionBtn icon="💰" label="Dividendos" sub="Registrar cobros · van a Primas y MTM" color={T.green} onClick={() => sheetDo("dividendos")} />}
+                {p.tipo === "Long Stock" && <ActionBtn icon="💰" label="Dividendos" sub="Registrar cobros · van a Primas y MTM" color={T.green} onClick={() => sheetDo("dividendos")} />}
                 {!p.closed && <ActionBtn icon="✎" label="Editar" sub="Modificar cualquier campo de la posición" onClick={() => sheetDo("edit")} />}
                 {canRollP && <ActionBtn icon="🔄" label="Rolar" sub={"Recompra + nueva venta · " + (p.rollChain || []).length + " roll" + ((p.rollChain || []).length === 1 ? "" : "s") + " hasta ahora"} color={T.purple} onClick={() => sheetDo("roll")} />}
                 {canCloseP && <ActionBtn icon="✕" label="Cerrar posición" sub="Registra el cierre con fecha, precio y comisión" onClick={() => sheetDo("close")} />}
@@ -5709,7 +5706,7 @@ function App() {
                     </div>
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <WizInput label="Contratos" value={wizForm.contratos} onChange={wizF("contratos")} inputMode="numeric" />
-                      <WizInput label="Prima $/acc · + cobrada − pagada" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" signed />
+                      <WizInput label="Prima $/acc" value={wizForm.prima} onChange={wizF("prima")} inputMode="decimal" signed />
                     </div>
                     {/* covered call: cubierta por acciones — ni consume margen propio ni computa riesgo plausible */}
                     {wizStrat === "Covered Call" ? (
@@ -6188,7 +6185,7 @@ function App() {
     {/* NAV INFERIOR — fuera del contenedor de scroll: fijo al viewport, no se mueve con el rebote.
        Oculto mientras el asistente está abierto para no tapar sus últimas opciones. */}
     {view === "bloques" && !wizOpen && (
-      <button onClick={openWizard} aria-label="Nueva posición" style={{ position: "fixed", right: 16, bottom: 88, zIndex: 41, width: 52, height: 52, border: "0.5px solid rgba(255,255,255,0.08)", cursor: "pointer", borderRadius: 26, background: "rgba(28,26,32,0.62)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", color: "#fff", fontSize: 26, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
+      <button onClick={openWizard} aria-label="Nueva posición" style={{ position: "fixed", right: "max(16px, calc(50% - 270px))", bottom: 88, zIndex: 41, width: 52, height: 52, border: "0.5px solid rgba(255,255,255,0.08)", cursor: "pointer", borderRadius: 26, background: "rgba(28,26,32,0.62)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", color: "#fff", fontSize: 26, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
     )}
     {!wizOpen && (
     <div style={{ position: "fixed", left: 12, right: 12, bottom: 14, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
