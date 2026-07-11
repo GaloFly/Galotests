@@ -122,10 +122,11 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.20";
+const APP_VERSION = "5.28";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
+const KEY_MANUALBK = "bloques_manual_backups_v1"; // últimas copias JSON guardadas por el usuario (restaurables desde la lista)
 const KEY_FLOWS = "bloques_aportaciones_v1";
 const BACKUP_KEYS = [KEY_ACC, KEY_POS, KEY_SNAP, KEY_BROKERS, KEY_TRADES, KEY_BASIS, KEY_VIEW, KEY_FINNHUB, KEY_GEMINI, KEY_FLOWS, "bloques_show_pnl"];
 const BASIS_KEYS = ["roi", "annRoi", "rom", "annRom", "impact"];
@@ -229,11 +230,58 @@ const bepAutoStrat = (p) => (natOf(p) === "CRED" ? "CREDIT" : BEP_DEBIT_STRATS.h
 const isPMCC = (p) => { const t = (p.tipo || "").toLowerCase(); return t === "pmcc" || t === "diagonal"; };
 const pmccNetDebit = (p) => n((p.long || {}).prima) - n(p.prima); // por acción; baja según acumula la short
 const pmccRisk = (p) => Math.max(0, pmccNetDebit(p)) * n(p.qty);
+/* ---------- lotes de acciones/ETF (v5.22) ----------
+   Una posición de acciones puede desglosarse en lotes {date, qty, price}. Los lotes son la FUENTE: de ellos
+   se derivan la cantidad total (Σ qty) y el BEP de la posición (media ponderada Σ(qty·price)/Σqty). Al editar
+   lotes se recalculan y guardan p.qty y p.bep, así que el resto de la app (que lee p.qty y effBep) no cambia. */
+const hasLots = (p) => Array.isArray(p.lots) && p.lots.length > 0;
+const lotsQty = (p) => (p.lots || []).reduce((s, l) => s + n(l.qty), 0);
+const lotsBep = (p) => { const q = lotsQty(p); return q ? (p.lots || []).reduce((s, l) => s + n(l.qty) * n(l.price), 0) / q : 0; };
+const trimNum = (x) => String(Number(x.toFixed(6)));
+/* recalcula qty/bep/entryDate de una posición a partir de sus lotes (limpia los vacíos) */
+function applyLots(p, lots) {
+  const clean = (lots || []).filter((l) => n(l.qty) !== 0).map((l) => ({ id: l.id || (Date.now().toString(36) + Math.random().toString(36).slice(2, 6)), date: l.date || "", qty: String(n(l.qty)), price: String(n(l.price)) }));
+  if (!clean.length) { const { lots: _drop, ...rest } = p; return { ...rest, lots: [], qty: "0" }; }
+  const q = clean.reduce((s, l) => s + n(l.qty), 0);
+  const cost = clean.reduce((s, l) => s + n(l.qty) * n(l.price), 0);
+  const earliest = clean.map((l) => l.date).filter(Boolean).sort()[0];
+  return { ...p, lots: clean, qty: String(q), bep: trimNum(q ? cost / q : 0), entryDate: earliest || p.entryDate };
+}
+/* realizado FIFO al cerrar por completo una posición con lotes: consume del lote más antiguo al más nuevo.
+   En un cierre total el neto coincide con (precio − BEP medio) × qty; se calcula lote a lote para que sea
+   FIFO explícito y correcto aunque los lotes tengan costes distintos. */
+function fifoRealized(lots, price, fee) {
+  const ordered = [...(lots || [])].filter((l) => n(l.qty) > 0).sort((a, b) => ((a.date || "") < (b.date || "") ? -1 : (a.date || "") > (b.date || "") ? 1 : 0));
+  const real = ordered.reduce((s, l) => s + (n(price) - n(l.price)) * n(l.qty), 0);
+  return real - n(fee);
+}
+/* vende FIFO una cantidad de acciones a un precio: consume los lotes más antiguos primero. Devuelve los
+   lotes que quedan abiertos y las ventas generadas (una por parcela consumida, con el coste de su lote).
+   La comisión se aplica íntegra a la primera parcela. */
+function fifoSell(lots, qty, price, date, fee) {
+  const ordered = [...(lots || [])].filter((l) => n(l.qty) > 0).sort((a, b) => ((a.date || "") < (b.date || "") ? -1 : (a.date || "") > (b.date || "") ? 1 : 0));
+  let remaining = n(qty); let feeLeft = n(fee);
+  const outLots = []; const sales = [];
+  ordered.forEach((l) => {
+    const lq = n(l.qty);
+    if (remaining <= 0) { outLots.push(l); return; }
+    const take = Math.min(remaining, lq);
+    if (take > 0) {
+      const f = feeLeft; feeLeft = 0;
+      sales.push({ id: "s" + Math.random().toString(36).slice(2, 8), date: date || "", qty: String(take), price: String(n(price)), cost: String(n(l.price)), fee: String(f) });
+    }
+    remaining -= take;
+    const left = lq - take;
+    if (left > 0) outLots.push({ ...l, qty: String(left) });
+  });
+  return { outLots, sales };
+}
 const effBep = (p) => {
   if (isPMCC(p)) return pmccNetDebit(p);
   const s = bepAutoStrat(p);
   if (s === "CREDIT") return n(p.strike) - n(p.prima);
   if (s === "DEBIT") return n(p.strike) + n(p.prima);
+  if (natOf(p) === "ACC" && hasLots(p)) return lotsBep(p);
   return n(p.bep);
 };
 /* Long Call (débito de una pata): su riesgo es SIEMPRE el 100% de la prima pagada = prima × qty.
@@ -1634,6 +1682,9 @@ function RollChainEditor({ p, onSave, onClose }) {
   const primaAcc = n(open.prima) + rolls.reduce((s, r) => s + (n(r.credit) - n(r.buyback)), 0);
   const lastStrike = rolls.length ? n(rolls[rolls.length - 1].strike) : n(open.strike);
   const bepNow = lastStrike - primaAcc;
+  /* BEP que va quedando tras cada pata: apertura = strike − prima; tras cada roll = nuevo strike − prima acumulada */
+  const bepOpen = n(open.strike) - n(open.prima);
+  const rollBep = (() => { let acc = n(open.prima); return rolls.map((r) => { acc += (n(r.credit) - n(r.buyback)); return n(r.strike) - acc; }); })();
 
   const save = () => {
     if (editableChain) {
@@ -1660,7 +1711,10 @@ function RollChainEditor({ p, onSave, onClose }) {
         </div>
 
         {/* APERTURA */}
-        <div style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5, margin: "6px 0 8px" }}>Apertura</div>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, margin: "6px 0 8px" }}>
+          <span style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5 }}>Apertura</span>
+          {editableChain && <span style={{ fontSize: 11, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums" }}>BEP tras apertura ${money2(bepOpen)}</span>}
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <WizInput label="Fecha de entrada" value={open.date} onChange={setOpenF("date")} type="date" />
           {editableChain && <WizInput label="Strike apertura" value={open.strike} onChange={setOpenF("strike")} placeholder="$" inputMode="decimal" />}
@@ -1679,9 +1733,10 @@ function RollChainEditor({ p, onSave, onClose }) {
             {rolls.length === 0 && <div style={{ fontSize: 12, color: T.sub, fontWeight: 500, padding: "2px 2px 4px" }}>Sin rolls. La posición se abrió y no se ha rolado.</div>}
             {rolls.map((r, i) => (
               <div key={i} style={{ background: T.tile, borderRadius: 14, padding: "12px 12px 10px", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
-                  <span style={{ fontSize: 11.5, fontWeight: 800, color: T.purple }}>🔄 Roll {i + 1}</span>
-                  <button onClick={() => delRoll(i)} style={{ background: "transparent", border: "none", fontSize: 11.5, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar roll</button>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 8 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 800, color: T.purple, whiteSpace: "nowrap" }}>🔄 Roll {i + 1}</span>
+                  <span style={{ fontSize: 11, fontWeight: 800, color: T.green, fontVariantNumeric: "tabular-nums", marginLeft: "auto" }}>BEP ${money2(rollBep[i])}</span>
+                  <button onClick={() => delRoll(i)} style={{ background: "transparent", border: "none", fontSize: 11.5, fontWeight: 700, color: T.red, cursor: "pointer", whiteSpace: "nowrap" }}>Eliminar</button>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
                   <WizInput label="Fecha del roll" value={r.date} onChange={setRollF(i, "date")} type="date" />
@@ -1739,7 +1794,230 @@ function RollChainEditor({ p, onSave, onClose }) {
   );
 }
 
-function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll, onClose, onReopen, pctBloque, pctCartera, showPnl, brokers, hideBroker, pendingAction, clearPending, onRollingChange, coveredLabel, onEditChain }) {
+/* ---------- editor de lotes de una posición de acciones/ETF (v5.22) ----------
+   Cada lote = {date, qty, price}. El total de acciones y el BEP (media ponderada) se derivan de los lotes.
+   Se abre pulsando "Lotes / añadir lote" en una posición de acciones. */
+function LotsEditor({ p, onSave, onClose }) {
+  const mkLot = (date, qty, price) => ({ id: "l" + Math.random().toString(36).slice(2, 8), date: date || "", qty: qty != null ? String(qty) : "", price: price != null ? String(price) : "" });
+  const seed = () => (hasLots(p) ? p.lots.map((l) => ({ ...l })) : [mkLot(p.entryDate || "", n(p.qty) || "", n(p.bep) || "")]);
+  const [lots, setLots] = useState(seed);
+  const [sales, setSales] = useState(() => (Array.isArray(p.soldLots) ? p.soldLots.map((s) => ({ ...s })) : []));
+  const [sellIdx, setSellIdx] = useState(null);
+  const [sellQty, setSellQty] = useState("");
+  const [sellPrice, setSellPrice] = useState("");
+  const [sellDate, setSellDate] = useState("");
+  const [sellFee, setSellFee] = useState("");
+  const [openLot, setOpenLot] = useState(null); // id del lote desplegado para editar (acordeón)
+  const setLotF = (i, k) => (v) => setLots((ls) => ls.map((l, idx) => (idx === i ? { ...l, [k]: v } : l)));
+  const addLot = () => setLots((ls) => [...ls, mkLot(new Date().toISOString().slice(0, 10), "", "")]);
+  const delLot = (i) => setLots((ls) => ls.filter((_, idx) => idx !== i));
+  const openSell = (i) => { setSellIdx(i); setOpenLot(lots[i].id || i); setSellQty(String(n(lots[i].qty))); setSellPrice(""); setSellDate(new Date().toISOString().slice(0, 10)); setSellFee(""); };
+  const confirmSell = () => {
+    const i = sellIdx; if (i == null) return;
+    const lot = lots[i]; const q = Math.min(n(sellQty), n(lot.qty));
+    if (q <= 0 || n(sellPrice) === 0) { setSellIdx(null); return; }
+    const sale = { id: "s" + Math.random().toString(36).slice(2, 8), date: sellDate || "", qty: String(q), price: String(n(sellPrice)), cost: String(n(lot.price)), fee: String(n(sellFee)) };
+    setSales((ss) => [sale, ...ss]);
+    setLots((ls) => ls.map((l, idx) => (idx === i ? { ...l, qty: String(n(l.qty) - q) } : l)).filter((l) => n(l.qty) > 0));
+    setSellIdx(null);
+  };
+  const removeSale = (sid) => {
+    const s = sales.find((x) => x.id === sid); if (!s) return;
+    setLots((ls) => [...ls, mkLot(s.date, n(s.qty), n(s.cost))]);
+    setSales((ss) => ss.filter((x) => x.id !== sid));
+  };
+  const saleRealized = (s) => (n(s.price) - n(s.cost)) * n(s.qty) - n(s.fee);
+  const realizedTotal = sales.reduce((a, s) => a + saleRealized(s), 0);
+  const totQty = lots.reduce((s, l) => s + n(l.qty), 0);
+  const totCost = lots.reduce((s, l) => s + n(l.qty) * n(l.price), 0);
+  const bep = totQty ? totCost / totQty : 0;
+  const lastPx = n(p.last);
+  const totUnrl = lastPx ? (lastPx - bep) * totQty : NaN;
+  const totPct = lastPx && bep ? (lastPx / bep - 1) : NaN;
+  const save = () => {
+    const cleanSales = sales.filter((s) => n(s.qty) > 0);
+    const remainingQty = lots.reduce((a, l) => a + n(l.qty), 0);
+    let next = { ...applyLots(p, lots), soldLots: cleanSales };
+    if (cleanSales.length && remainingQty <= 0) {
+      /* todo vendido → posición cerrada. El P&L realizado se registra vía soldLots (Movimientos/MTM);
+         se deja closePrice vacío para no duplicar el cierre. */
+      const lastDate = cleanSales.map((s) => s.date).filter(Boolean).sort().slice(-1)[0] || next.entryDate;
+      next = { ...next, qty: "0", closed: true, closeDate: lastDate, closePrice: "", closeComision: "" };
+    } else if (p.closed && remainingQty > 0) {
+      next = { ...next, closed: false };
+    }
+    onSave(next);
+    onClose();
+  };
+  return (
+    <div onClick={onClose} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: "calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom))" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 26, padding: "18px 18px 24px", width: "100%", maxWidth: 560, maxHeight: "88vh", overflowY: "auto", boxSizing: "border-box", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>📦 Lotes de {p.tkr || "acciones"}</div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>Compra por fecha/acciones/precio (el BEP es la media ponderada). Puedes vender un lote entero o en parte: cada venta se registra en Movimientos/MTM.</div>
+          </div>
+          <button onClick={onClose} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+        </div>
+
+        <div style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 8 }}>Lotes abiertos</div>
+        {lots.length === 0 && <div style={{ fontSize: 12, color: T.sub, fontWeight: 500, padding: "2px 2px 8px" }}>No quedan acciones abiertas — todo vendido. Al guardar, la posición se cierra.</div>}
+        {lots.map((l, i) => {
+          const lid = l.id || i;
+          const isOpen = openLot === lid;
+          const px = n(p.last), cost = n(l.price), qy = n(l.qty);
+          const unrl = px ? (px - cost) * qy : NaN;
+          const pct = px && cost ? (px / cost - 1) : NaN;
+          const dateLbl = l.date ? new Date(l.date + "T00:00:00").toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" }) : "sin fecha";
+          return (
+            <div key={lid} style={{ background: T.tile, borderRadius: 14, marginBottom: 10, overflow: "hidden" }}>
+              {/* resumen del lote (tipo cadena): fecha · cantidad · BEP · unrealised + % */}
+              <div onClick={() => setOpenLot(isOpen ? null : lid)} style={{ padding: "11px 12px", cursor: "pointer" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+                  <span style={{ fontSize: 12.5, fontWeight: 800, color: T.ink, whiteSpace: "nowrap" }}>{dateLbl}</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: isFinite(unrl) ? (unrl >= 0 ? T.green : T.red) : T.sub }}>{isFinite(unrl) ? signMoney(unrl) : "sin precio"}{isFinite(pct) ? " (" + (pct >= 0 ? "+" : "") + (pct * 100).toFixed(1) + "%)" : ""}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginTop: 3 }}>
+                  <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, fontVariantNumeric: "tabular-nums" }}>{qy} acc · BEP ${money2(cost)}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: T.purple }}>{isOpen ? "▲ cerrar" : "▼ editar / vender"}</span>
+                </div>
+              </div>
+              {isOpen && (
+                <div style={{ padding: "0 12px 12px" }}>
+                  <div style={{ marginBottom: 8 }}><WizInput label="Fecha de compra" value={l.date} onChange={setLotF(i, "date")} type="date" /></div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                    <WizInput label="Nº acciones" value={l.qty} onChange={setLotF(i, "qty")} inputMode="numeric" />
+                    <WizInput label="Precio $/acc" value={l.price} onChange={setLotF(i, "price")} placeholder="$" inputMode="decimal" />
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+                    <button onClick={() => (sellIdx === i ? setSellIdx(null) : openSell(i))} style={{ flex: 1, background: T.tileGreen, border: "none", borderRadius: 10, padding: "9px 0", fontSize: 12.5, fontWeight: 800, color: T.green, cursor: "pointer" }}>{sellIdx === i ? "Cancelar venta" : "💵 Vender"}</button>
+                    {lots.length > 1 && <button onClick={() => { delLot(i); setOpenLot(null); }} style={{ flexShrink: 0, background: "transparent", border: "none", fontSize: 12, fontWeight: 700, color: T.red, cursor: "pointer", padding: "0 10px" }}>Eliminar lote</button>}
+                  </div>
+                  {sellIdx === i && (
+                    <div style={{ marginTop: 10, background: T.tileGreen, borderRadius: 12, padding: "10px 11px" }}>
+                      <div style={{ fontSize: 10.5, fontWeight: 800, color: T.green, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Vender de este lote</div>
+                      <div style={{ marginBottom: 8 }}><WizInput label="Fecha venta" value={sellDate} onChange={setSellDate} type="date" /></div>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        <WizInput label={"Nº acciones (máx " + qy + ")"} value={sellQty} onChange={setSellQty} inputMode="numeric" />
+                        <WizInput label="Precio venta $/acc" value={sellPrice} onChange={setSellPrice} placeholder="$" inputMode="decimal" />
+                      </div>
+                      <div style={{ marginTop: 8 }}><WizInput label="Comisión" value={sellFee} onChange={setSellFee} placeholder="$" inputMode="decimal" /></div>
+                      {n(sellQty) > 0 && n(sellPrice) > 0 && (
+                        <div style={{ fontSize: 11.5, fontWeight: 700, color: (n(sellPrice) - cost) >= 0 ? T.green : T.red, marginTop: 6 }}>P&L de la venta: {signMoney((n(sellPrice) - cost) * Math.min(n(sellQty), qy) - n(sellFee))}</div>
+                      )}
+                      <button onClick={confirmSell} style={{ width: "100%", marginTop: 8, background: T.green, border: "none", borderRadius: 10, padding: "10px 0", fontSize: 13, fontWeight: 800, color: "#fff", cursor: "pointer" }}>Registrar venta</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+
+        <button onClick={addLot} style={{ width: "100%", background: T.tilePurple, border: "none", borderRadius: 12, padding: "11px 0", fontSize: 13.5, fontWeight: 800, color: T.purple, cursor: "pointer", marginBottom: 12 }}>➕ Añadir lote</button>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.tileGreen, borderRadius: 12, padding: "10px 12px", marginBottom: 4 }}>
+          <div>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Abierto · BEP medio</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>{totQty} acc · BEP ${money2(bep)}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Coste abierto</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: T.ink, fontVariantNumeric: "tabular-nums" }}>${money2(totCost)}</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: isFinite(totUnrl) ? (totUnrl >= 0 ? T.tileGreen : T.tileRed) : T.tile, borderRadius: 12, padding: "10px 12px", marginBottom: 4 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Unrealised (abierto)</div>
+          <div style={{ fontSize: 16, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: isFinite(totUnrl) ? (totUnrl >= 0 ? T.green : T.red) : T.sub }}>{isFinite(totUnrl) ? signMoney(totUnrl) : "sin precio"}{isFinite(totPct) ? " (" + (totPct >= 0 ? "+" : "") + (totPct * 100).toFixed(1) + "%)" : ""}</div>
+        </div>
+
+        {sales.length > 0 && (
+          <div style={{ marginTop: 14 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 6 }}>
+              <span style={{ fontSize: 10.5, fontWeight: 800, color: T.sub, textTransform: "uppercase", letterSpacing: 0.5 }}>Ventas registradas</span>
+              <span style={{ fontSize: 12, fontWeight: 800, color: realizedTotal >= 0 ? T.green : T.red }}>P&L realizado {signMoney(realizedTotal)}</span>
+            </div>
+            <div style={{ display: "grid", gap: 7 }}>
+              {sales.map((s) => (
+                <div key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.tile, borderRadius: 12, padding: "9px 11px", gap: 8 }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 800, color: T.ink }}>{n(s.qty)} acc @ ${money2(n(s.price))} <span style={{ fontSize: 10.5, fontWeight: 600, color: T.sub }}>(coste ${money2(n(s.cost))})</span></div>
+                    <div style={{ fontSize: 10.5, fontWeight: 600, color: T.sub }}>{s.date || "sin fecha"} · <span style={{ color: saleRealized(s) >= 0 ? T.green : T.red, fontWeight: 800 }}>{signMoney(saleRealized(s))}</span></div>
+                  </div>
+                  <button onClick={() => removeSale(s.id)} style={{ flexShrink: 0, background: "transparent", border: "none", fontSize: 11, fontWeight: 700, color: T.red, cursor: "pointer" }}>Deshacer</button>
+                </div>
+              ))}
+            </div>
+            <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 6 }}>Cada venta aparece en Movimientos → MTM con su P&L realizado. "Deshacer" devuelve esas acciones a un lote abierto.</div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+          <button onClick={onClose} style={{ flex: 1, background: T.tile, border: "none", borderRadius: 14, padding: "14px 0", fontSize: 15, fontWeight: 700, color: T.ink, cursor: "pointer" }}>Cancelar</button>
+          <button onClick={save} style={{ flex: 2, background: T.green, border: "none", borderRadius: 14, padding: "14px 0", fontSize: 15, fontWeight: 800, color: "#fff", cursor: "pointer" }}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- editor de dividendos de una posición de acciones/ETF (v5.28) ----------
+   Cada dividendo = {date, amount, fee}. Es ingreso: se registra tanto en Movimientos → Primas (como cobro)
+   como en MTM (cash realizado). Se abre desde la hoja de la posición ("Dividendos"). */
+function DividendsEditor({ p, onSave, onClose }) {
+  const mkDiv = (date, amount, fee) => ({ id: "d" + Math.random().toString(36).slice(2, 8), date: date || "", amount: amount != null ? String(amount) : "", fee: fee != null ? String(fee) : "" });
+  const [divs, setDivs] = useState(() => (Array.isArray(p.dividends) ? p.dividends.map((d) => ({ ...d })) : [mkDiv(new Date().toISOString().slice(0, 10), "", "")]));
+  const setDivF = (i, k) => (v) => setDivs((ds) => ds.map((d, idx) => (idx === i ? { ...d, [k]: v } : d)));
+  const addDiv = () => setDivs((ds) => [...ds, mkDiv(new Date().toISOString().slice(0, 10), "", "")]);
+  const delDiv = (i) => setDivs((ds) => ds.filter((_, idx) => idx !== i));
+  const net = (d) => n(d.amount) - n(d.fee);
+  const total = divs.reduce((a, d) => a + net(d), 0);
+  const save = () => { onSave({ ...p, dividends: divs.filter((d) => n(d.amount) !== 0 || n(d.fee) !== 0).map((d) => ({ id: d.id, date: d.date || "", amount: String(n(d.amount)), fee: String(n(d.fee)) })) }); onClose(); };
+  return (
+    <div onClick={onClose} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
+      style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 70, padding: "calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom))" }}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 26, padding: "18px 18px 24px", width: "100%", maxWidth: 560, maxHeight: "88vh", overflowY: "auto", boxSizing: "border-box", boxShadow: "0 20px 60px rgba(0,0,0,0.4)" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 17, fontWeight: 800, color: T.ink }}>💰 Dividendos de {p.tkr || "acciones"}</div>
+            <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, marginTop: 2 }}>Fecha, importe y comisión de cada cobro. Se registra en Movimientos → Primas y en MTM.</div>
+          </div>
+          <button onClick={onClose} style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+        </div>
+
+        {divs.map((d, i) => (
+          <div key={d.id || i} style={{ background: T.tile, borderRadius: 14, padding: "12px 12px 10px", marginBottom: 10 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+              <span style={{ fontSize: 11.5, fontWeight: 800, color: net(d) >= 0 ? T.green : T.red }}>{signMoney(net(d))} neto</span>
+              {divs.length > 1 && <button onClick={() => delDiv(i)} style={{ background: "transparent", border: "none", fontSize: 11.5, fontWeight: 700, color: T.red, cursor: "pointer" }}>Eliminar</button>}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1fr", gap: 8 }}>
+              <WizInput label="Fecha" value={d.date} onChange={setDivF(i, "date")} type="date" />
+              <WizInput label="Importe $" value={d.amount} onChange={setDivF(i, "amount")} placeholder="$" inputMode="decimal" />
+              <WizInput label="Comisión $" value={d.fee} onChange={setDivF(i, "fee")} placeholder="$" inputMode="decimal" />
+            </div>
+          </div>
+        ))}
+
+        <button onClick={addDiv} style={{ width: "100%", background: T.tilePurple, border: "none", borderRadius: 12, padding: "11px 0", fontSize: 13.5, fontWeight: 800, color: T.purple, cursor: "pointer", marginBottom: 12 }}>➕ Añadir dividendo</button>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: total >= 0 ? T.tileGreen : T.tileRed, borderRadius: 12, padding: "10px 12px", marginBottom: 4 }}>
+          <span style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>Total dividendos (neto)</span>
+          <span style={{ fontSize: 16, fontWeight: 800, fontVariantNumeric: "tabular-nums", color: total >= 0 ? T.green : T.red }}>{signMoney(total)}</span>
+        </div>
+
+        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+          <button onClick={onClose} style={{ flex: 1, background: T.tile, border: "none", borderRadius: 14, padding: "14px 0", fontSize: 15, fontWeight: 700, color: T.ink, cursor: "pointer" }}>Cancelar</button>
+          <button onClick={save} style={{ flex: 2, background: T.green, border: "none", borderRadius: 14, padding: "14px 0", fontSize: 15, fontWeight: 800, color: "#fff", cursor: "pointer" }}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll, onClose, onReopen, pctBloque, pctCartera, showPnl, brokers, hideBroker, pendingAction, clearPending, onRollingChange, coveredLabel, onEditChain, onEditLots }) {
   const detail = optionDetail(p);
   const nat = natOf(p);
   const cap = capDesplegado(p);
@@ -1781,9 +2059,12 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
   const [closeLongPriceV, setCloseLongPriceV] = useState(""); // PMCC: precio de venta de la pata larga
   const [closeLongComisionV, setCloseLongComisionV] = useState("");
   const [closeExercised, setCloseExercised] = useState(false); // cierre por ejercicio / asignación
-  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setCloseNoteV(""); setCloseLongPriceV(""); setCloseLongComisionV(""); setCloseExercised(false); setClosing(true); };
+  const [closeMode, setCloseMode] = useState("total"); // acciones: total o parcial
+  const [closeQtyV, setCloseQtyV] = useState(""); // nº de acciones en cierre parcial
+  const openClose = () => { setCloseDateV(new Date().toISOString().slice(0, 10)); setClosePriceV(""); setCloseComisionV(""); setCloseNoteV(""); setCloseLongPriceV(""); setCloseLongComisionV(""); setCloseExercised(false); setCloseMode("total"); setCloseQtyV(String(n(p.qty))); setClosing(true); };
   const confirmClose = () => {
-    onClose({ date: closeDateV, price: closeExercised ? "0" : closePriceV, comision: closeComisionV, note: closeNoteV, longPrice: closeLongPriceV, longComision: closeLongComisionV, exercised: closeExercised });
+    const partial = natOf(p) === "ACC" && closeMode === "parcial";
+    onClose({ date: closeDateV, price: closeExercised ? "0" : closePriceV, comision: closeComisionV, note: closeNoteV, longPrice: closeLongPriceV, longComision: closeLongComisionV, exercised: closeExercised, partial, qtyPart: partial ? closeQtyV : "" });
     setClosing(false);
   };
   useEffect(() => {
@@ -1879,6 +2160,11 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
             <EditField label="Cantidad (contratos)" span={2}
               value={p.qty === "" || p.qty == null ? "" : String(n(p.qty) / 100)}
               onChange={(v) => { if (v === "") { onChange("qty")(""); return; } const shares = Math.round(n(v) * 100 * 1e6) / 1e6; onChange("qty")(String(shares)); }} />
+          ) : hasLots(p) ? (
+            <div style={{ gridColumn: "span 2", background: T.tile, borderRadius: 12, padding: "9px 11px" }}>
+              <div style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>Cantidad (acciones) · gestionada por lotes</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>{n(p.qty)} acc <span style={{ fontSize: 11, fontWeight: 600, color: T.sub }}>· {p.lots.length} lote{p.lots.length > 1 ? "s" : ""}</span></div>
+            </div>
           ) : (
             <EditField label="Cantidad (acciones)" value={p.qty} onChange={onChange("qty")} span={2} />
           ))}
@@ -1914,9 +2200,15 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
           {!cash && <EditSection icon="💲" title="Precios y entrada" />}
           {!cash && (bepAutoStrat(p) || isCreditSpread(p) ? (
             <EditField label={isPMCC(p) ? "Prima short cobrada $/acc" : isCreditSpread(p) ? "Open price $/acc" : "Prima por acción"} prefix="$" value={p.prima} onChange={onChange("prima")} />
+          ) : hasLots(p) ? (
+            <div style={{ background: T.tile, borderRadius: 12, padding: "9px 11px" }}>
+              <div style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>BEP · media de lotes</div>
+              <div style={{ fontSize: 14, fontWeight: 800, color: T.ink }}>${money2(effBep(p))}</div>
+            </div>
           ) : (
             <EditField label="BEP" prefix="$" value={p.bep} onChange={onChange("bep")} />
           ))}
+          {!cash && hasLots(p) && <div style={{ gridColumn: "span 2", fontSize: 10.5, color: T.sub, fontWeight: 600, lineHeight: 1.4, marginTop: -4 }}>Cantidad y BEP se calculan desde los lotes. Edítalos con 📦 Lotes más abajo.</div>}
           {!cash && isCreditSpread(p) && (
             (p.tipo === "Iron Condor") ? (
               <>
@@ -2193,6 +2485,9 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
           {opt && onEditChain && (
             <button type="button" onClick={() => onEditChain(p.id)} style={{ gridColumn: "span 2", background: T.tilePurple, border: "none", borderRadius: 12, padding: "12px 0", fontSize: 13, fontWeight: 800, color: T.purple, cursor: "pointer" }}>✏️ Editar aperturas, rolls y cierre</button>
           )}
+          {nat === "ACC" && onEditLots && (
+            <button type="button" onClick={() => onEditLots(p.id)} style={{ gridColumn: "span 2", background: T.tilePurple, border: "none", borderRadius: 12, padding: "12px 0", fontSize: 13, fontWeight: 800, color: T.purple, cursor: "pointer" }}>📦 Lotes / añadir lote{hasLots(p) ? " (" + p.lots.length + ")" : ""}</button>
+          )}
           <button type="button" onClick={onDone} style={{ gridColumn: "span 2", marginTop: 4, background: T.dark, border: "none", borderRadius: 14, padding: "13px 0", fontSize: 14.5, fontWeight: 800, color: "#fff", cursor: "pointer" }}>✓ Listo</button>
           <button onClick={onDelete} style={{ gridColumn: "span 2", background: "transparent", border: "none", borderRadius: 10, padding: "8px 0", fontSize: 12.5, fontWeight: 700, color: T.red, cursor: "pointer", opacity: 0.85 }}>Eliminar posición</button>
         </div>
@@ -2251,8 +2546,12 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
       {closing && (() => {
         /* ---------- SHEET DE CIERRE: mismo formato de hoja inferior que el asistente ---------- */
         const pmcc = isPMCC(p);
-        const ok = closeDateV && (closeExercised || closePriceV) && (!pmcc || closeLongPriceV !== "");
+        const isStock = natOf(p) === "ACC";
+        const partial = isStock && closeMode === "parcial";
         const q = n(p.qty);
+        const sellQty = partial ? Math.max(0, Math.min(n(closeQtyV), q)) : q;
+        const okQty = !partial || sellQty > 0;
+        const ok = closeDateV && (closeExercised || closePriceV) && (!pmcc || closeLongPriceV !== "") && okQty;
         const px = n(closePriceV);
         const shortSide = natOf(p) === "CRED" || isCreditSpread(p);
         const canExercise = opt && natOf(p) === "CRED" && !pmcc; // short put / covered call: se pueden ejercer/asignar
@@ -2262,7 +2561,7 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
         const lg = p.long || {};
         const est = pmcc
           ? ((closePriceV === "" && closeLongPriceV === "") ? NaN : (n(closeLongPriceV) - n(lg.prima) - px) * q)
-          : (closePriceV === "" ? NaN : (opt ? (shortSide ? (n(p.prima) - px) * q : (px - n(p.prima)) * q) : (px - effBep(p)) * q));
+          : (closePriceV === "" ? NaN : (opt ? (shortSide ? (n(p.prima) - px) * q : (px - n(p.prima)) * q) : (px - effBep(p)) * sellQty));
         return (
           <div onClick={() => setClosing(false)} onTouchStart={(e) => e.stopPropagation()} onTouchMove={(e) => e.stopPropagation()} onTouchEnd={(e) => e.stopPropagation()}
             style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.5)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 60, padding: "calc(14px + env(safe-area-inset-top)) 14px calc(14px + env(safe-area-inset-bottom))" }}>
@@ -2282,6 +2581,14 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 10 }}>
                 <WizInput label="Fecha de cierre" value={closeDateV} onChange={setCloseDateV} type="date" />
+                {isStock && (
+                  <div style={{ gridColumn: "span 2" }}>
+                    <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>¿Cuánto cierras?</span>
+                    <Pill options={["Total", "Parcial"]} value={partial ? "Parcial" : "Total"} onChange={(v) => { setCloseMode(v === "Parcial" ? "parcial" : "total"); if (v === "Parcial" && !closeQtyV) setCloseQtyV(String(q)); }} size="sm" />
+                  </div>
+                )}
+                {partial && <WizInput label={"Nº acciones a vender (máx " + q + ")"} value={closeQtyV} onChange={setCloseQtyV} inputMode="numeric" />}
+                {isStock && partial && <div style={{ gridColumn: "span 2", fontSize: 10.5, color: T.sub, fontWeight: 600, lineHeight: 1.4, marginTop: -4 }}>Se venden {sellQty > 0 ? sellQty : "—"} acc por FIFO (lotes más antiguos primero). El resto sigue abierto; si vendes todas, la posición se cierra.</div>}
                 {canExercise && (
                   <div style={{ gridColumn: "span 2" }}>
                     <span style={{ display: "block", fontSize: 10, color: T.sub, fontWeight: 600, marginBottom: 3, textTransform: "uppercase", letterSpacing: 0.4 }}>¿Cómo se cierra?</span>
@@ -2354,7 +2661,7 @@ function NavIcon({ name }) {
 }
 
 /* ---------- tarjeta de bloque activo ---------- */
-function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, rollPos, closePos, reopenPos, showPnl, togglePnl, brokers, onOpenSheet, pendingAction, clearPending, coveredMap, onEditChain }) {
+function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPos, addPos, delPos, rollPos, closePos, reopenPos, showPnl, togglePnl, brokers, onOpenSheet, pendingAction, clearPending, coveredMap, onEditChain, onEditLots }) {
   const [rollingIds, setRollingIds] = useState(new Set()); // filas con el panel de roll abierto → swipe-eliminar desactivado
   const activePositions = positions.filter((p) => !p.closed);
   const capBlock = activePositions.reduce((s, p) => s + capDesplegado(p), 0);
@@ -2412,7 +2719,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
               coveredLabel={(coveredMap || {})[p.id]}
               onChange={(k) => (v) => setPos(p.id, k, v)} onDelete={() => delPos(p.id)} showPnl={showPnl} brokers={brokers}
               onRoll={(vals) => rollPos(p.id, vals)} onClose={(vals) => closePos(p.id, vals)} onReopen={() => reopenPos(p.id)}
-              onEditChain={onEditChain}
+              onEditChain={onEditChain} onEditLots={onEditLots}
               pctBloque={capBlock ? capDesplegado(p) / capBlock : NaN} pctCartera={nlv ? capDesplegado(p) / nlv : NaN} />
           </SwipeDelete>
         ))}
@@ -2433,7 +2740,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
    · Estrategias — TODAS las posiciones (abiertas y cerradas) archivadas por tipo: Acciones, Covered
      Calls, Short Puts, PMCC, DC/DD, Otras. Selector Abiertas/Cerradas. Al pulsar una posición se expande
      con: cadena de rolls, prima acumulada, BEP, ROM (prima/riesgo), DTE, DIT e IVR de apertura. ---------- */
-function MovimientosView({ positions, reopenPos, onEditChain }) {
+function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEditDiv }) {
   const [sub, setSub] = useState("primas");
   const [stratCat, setStratCat] = useState("Acciones");
   const [stratStatus, setStratStatus] = useState("Abiertas");
@@ -2583,8 +2890,29 @@ function MovimientosView({ positions, reopenPos, onEditChain }) {
       }
     } else if ((natOf(p) === "ACC" || natOf(p) === "COLLAR") && p.closed && p.closePrice !== "" && p.closePrice != null) {
       const fee = n(p.closeComision);
-      const net = (n(p.closePrice) - n(effBep(p))) * qty - fee;
-      mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Cierre", cash: net, fee, strike: "", right: "", qty: qtyLabelOf(p), bep: n(effBep(p)), note: p.closeNote || "" });
+      const useFifo = natOf(p) === "ACC" && hasLots(p);
+      const net = useFifo ? fifoRealized(p.lots, p.closePrice, fee) : (n(p.closePrice) - n(effBep(p))) * qty - fee;
+      mtmEvents.push({ id: p.id + "-closemtm", posId: p.id, date: p.closeDate, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: useFifo ? "Cierre FIFO" : "Cierre", cash: net, fee, strike: "", right: "", qty: qtyLabelOf(p), bep: n(effBep(p)), note: p.closeNote || "" });
+    }
+    /* ventas por lote (v5.24): cada venta parcial/total de acciones registra su P&L realizado en MTM,
+       independientemente de que la posición siga abierta. Realizado = (precio − coste del lote) × qty − fee. */
+    if (natOf(p) === "ACC" && Array.isArray(p.soldLots)) {
+      p.soldLots.forEach((s, idx) => {
+        const sfee = n(s.fee);
+        const realized = (n(s.price) - n(s.cost)) * n(s.qty) - sfee;
+        mtmEvents.push({ id: p.id + "-sold" + (s.id || idx), posId: p.id, date: s.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Venta lote", cash: realized, fee: sfee, strike: "", right: "", qty: n(s.qty) + " acc", bep: n(s.cost), note: "Venta " + n(s.qty) + " @ $" + money2(n(s.price)) + " (coste $" + money2(n(s.cost)) + ")" });
+      });
+    }
+    /* dividendos (v5.28): ingreso de acciones/ETF. Va tanto a Primas (cobro) como a MTM (cash realizado).
+       Cash neto = importe − comisión. Son listas distintas (dos pestañas), así que no se duplica en un total. */
+    if (natOf(p) === "ACC" && Array.isArray(p.dividends)) {
+      p.dividends.forEach((d, idx) => {
+        const dfee = n(d.fee);
+        const cash = n(d.amount) - dfee;
+        const base = { posId: p.id, date: d.date, tkr: p.tkr, block: p.block, tipo: p.tipo, kind: "Dividendo", cash, fee: dfee, strike: "", right: "", qty: "", note: "Dividendo" + (dfee ? " · comisión $" + money2(dfee) : "") };
+        primaEvents.push({ ...base, id: p.id + "-div" + (d.id || idx) });
+        mtmEvents.push({ ...base, id: p.id + "-divmtm" + (d.id || idx) });
+      });
     }
   });
 
@@ -2758,9 +3086,15 @@ function MovimientosView({ positions, reopenPos, onEditChain }) {
                           </div>
                         )}
                         {e.note ? <div style={{ fontSize: 11.5, color: T.sub, fontStyle: "italic", marginTop: 5, lineHeight: 1.4 }}>💬 {e.note}</div> : null}
-                        {onEditChain && e.posId && (
-                          <button onClick={(ev) => { ev.stopPropagation(); onEditChain(e.posId); }} style={{ width: "100%", marginTop: 9, background: T.tilePurple, border: "none", borderRadius: 10, padding: "10px 0", fontSize: 12.5, fontWeight: 800, color: T.purple, cursor: "pointer" }}>✏️ Editar este movimiento</button>
-                        )}
+                        {e.posId && (() => {
+                          const _pos = positions.find((x) => x.id === e.posId);
+                          const _isDiv = e.kind === "Dividendo";
+                          const _stock = _pos && natOf(_pos) === "ACC";
+                          const _h = _isDiv ? onEditDiv : _stock ? onEditLots : onEditChain;
+                          if (!_h) return null;
+                          const _lbl = _isDiv ? "dividendos" : _stock ? "lotes / ventas" : "este movimiento";
+                          return <button onClick={(ev) => { ev.stopPropagation(); _h(e.posId); }} style={{ width: "100%", marginTop: 9, background: T.tilePurple, border: "none", borderRadius: 10, padding: "10px 0", fontSize: 12.5, fontWeight: 800, color: T.purple, cursor: "pointer" }}>✏️ Editar {_lbl}</button>;
+                        })()}
                       </div>
                     )}
                   </div>
@@ -3532,6 +3866,8 @@ function App() {
   const [autoBackups, setAutoBackups] = useState([]);
   const [updateNotice, setUpdateNotice] = useState(null);
   const [confirmAutoBk, setConfirmAutoBk] = useState(null);
+  const [manualBackups, setManualBackups] = useState([]); // copias JSON guardadas por el usuario (restaurables)
+  const [confirmManualBk, setConfirmManualBk] = useState(null);
   const [brokers, setBrokers] = useState(SEED_BROKERS);
   const [brokerModalOpen, setBrokerModalOpen] = useState(false);
   const [newBrokerName, setNewBrokerName] = useState("");
@@ -3593,9 +3929,17 @@ function App() {
     try { const tr = localStorage.getItem(KEY_TRADES); if (tr) { const arr = JSON.parse(tr); if (Array.isArray(arr)) { setTrades(arr); haveTr = true; } } } catch (e) {}
     if (!haveTr) { try { const trOld = localStorage.getItem(KEY_TR_OLD); if (trOld) { const arr = JSON.parse(trOld); if (Array.isArray(arr) && arr.length) { setTrades(arr); haveTr = true; } } } catch (e) {} }
     (async () => {
-      if (!haveTr) { const tr = await idbGet(KEY_TRADES); if (tr) { try { const arr = JSON.parse(tr); if (Array.isArray(arr)) setTrades(arr); } catch (e) {} } }
-      if (!haveAcc) { const a = await idbGet(KEY_ACC); if (a) { try { setAccounts(JSON.parse(a)); haveAcc = true; } catch (e) {} } }
-      if (!havePos) { const p = await idbGet(KEY_POS); if (p) { try { setPositions(withNat(JSON.parse(p))); havePos = true; } catch (e) {} } }
+      /* IDB es la fuente autoritativa de los datos grandes. saveKV SIEMPRE escribe IDB; localStorage es
+         best-effort y, si se llena (cuota de iOS), se queda congelado en un snapshot viejo. v5.21: por eso, si
+         IDB tiene datos, MANDAN sobre el localStorage provisional que se pintó arriba — así una actualización
+         (que recarga la app) no revierte a un localStorage antiguo ni lo vuelve a grabar encima de IDB, que es
+         justo lo que borraba movimientos/estrategias/MTM. */
+      try { const a = await idbGet(KEY_ACC); if (a != null) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
+      try { const p = await idbGet(KEY_POS); if (p != null) { const arr = JSON.parse(p); if (Array.isArray(arr)) { setPositions(withNat(arr)); havePos = true; } } } catch (e) {}
+      try { const tr = await idbGet(KEY_TRADES); if (tr != null) { const arr = JSON.parse(tr); if (Array.isArray(arr)) { setTrades(arr); haveTr = true; } } } catch (e) {}
+      try { const s = await idbGet(KEY_SNAP); if (s != null) { const arr = JSON.parse(s); if (Array.isArray(arr)) setSnapshots(arr); } } catch (e) {}
+      try { const fl = await idbGet(KEY_FLOWS); if (fl != null) { const arr = JSON.parse(fl); if (Array.isArray(arr)) setFlows(arr); } } catch (e) {}
+      try { const br = await idbGet(KEY_BROKERS); if (br != null) { const arr = JSON.parse(br); if (Array.isArray(arr) && arr.length) setBrokers(arr); } } catch (e) {}
       if (!haveAcc || !havePos) {
         try {
           const aOld = localStorage.getItem(KEY_ACC_OLD);
@@ -3606,13 +3950,20 @@ function App() {
           }
         } catch (e) {}
       }
+      /* carga la lista de copias JSON guardadas por el usuario (IDB autoritativo, localStorage de respaldo) */
+      try {
+        let mbRaw = await idbGet(KEY_MANUALBK);
+        if (mbRaw == null) { try { mbRaw = localStorage.getItem(KEY_MANUALBK); } catch (e) {} }
+        if (mbRaw) { const arr = JSON.parse(mbRaw); if (Array.isArray(arr)) setManualBackups(arr); }
+      } catch (e) {}
 
       /* ---- copia automática por cambio de versión (IDB-aware), se ejecuta antes de que se sobrescriba nada ---- */
       try {
         const readRaw = async (k) => {
+          // IDB primero (autoritativo); localStorage después, para claves que solo viven ahí (basis, view, keys…)
           let v = null;
-          try { v = localStorage.getItem(k); } catch (e) {}
-          if (v == null) { try { const iv = await idbGet(k); if (iv != null) v = iv; } catch (e) {} }
+          try { const iv = await idbGet(k); if (iv != null) v = iv; } catch (e) {}
+          if (v == null) { try { v = localStorage.getItem(k); } catch (e) {} }
           return v;
         };
         // lista de copias: IDB primero, luego localStorage (migración de versiones antiguas)
@@ -3677,10 +4028,23 @@ function App() {
     setBackupText(JSON.stringify({ v: 11, appVersion: APP_VERSION, ts: Date.now(), brokers, accounts, positions: posOut, snapshots: nextSnaps, aportaciones: flows, trades, compBasis: basis, finnhubKey: apiKey, geminiKey, showPnl }, null, 2));
     setCopied(false); setRestoreMsg(""); setBackupOpen(true);
   };
+  /* guarda una copia JSON en la lista de restaurables (fecha/hora). Se llama cada vez que el usuario graba un
+     JSON (copiar o descargar). IDB autoritativo + localStorage best-effort. Se conservan las últimas 8. */
+  const recordManualBackup = (json) => {
+    if (!json) return;
+    const entry = { ts: Date.now(), appVersion: APP_VERSION, json };
+    setManualBackups((prev) => {
+      const next = [entry, ...prev].slice(0, 8);
+      try { idbSet(KEY_MANUALBK, JSON.stringify(next)); } catch (e) {}
+      try { localStorage.setItem(KEY_MANUALBK, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
   const copyBackup = async () => {
     setRestoreMsg("");
     try { await navigator.clipboard.writeText(backupText); setCopied(true); }
     catch (e) { try { const el = document.getElementById("backup-ta"); if (el) { el.focus(); el.select(); document.execCommand("copy"); setCopied(true); } } catch (e2) {} }
+    recordManualBackup(backupText);
     setTimeout(() => setCopied(false), 2500);
   };
   const pasteBackup = async () => {
@@ -3702,6 +4066,7 @@ function App() {
       const file = new File([blob], fname, { type: "application/json" });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         await navigator.share({ files: [file], title: "Backup Bloques" });
+        recordManualBackup(backupText);
         return;
       }
     } catch (e) { if (e && e.name === "AbortError") return; }
@@ -3711,6 +4076,7 @@ function App() {
       a.href = url; a.download = fname;
       document.body.appendChild(a); a.click();
       setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch (_) {} }, 1000);
+      recordManualBackup(backupText);
       setRestoreMsg("downloaded");
     } catch (e) { setRestoreMsg("fileErr"); }
   };
@@ -3789,6 +4155,12 @@ function App() {
       try { localStorage.setItem(KEY_APPVER, APP_VERSION); } catch (e) {}
       location.reload();
     } catch (e) { setRestoreMsg("err"); }
+  };
+
+  const restoreManualBackup = (bk) => {
+    if (confirmManualBk !== bk.ts) { setConfirmManualBk(bk.ts); setTimeout(() => setConfirmManualBk(null), 4000); return; }
+    setConfirmManualBk(null);
+    applyBackup(bk.json); // restaura a estado (que se persiste en IDB + localStorage); cierra el modal al terminar
   };
 
   const runRefresh = async (key) => {
@@ -3958,12 +4330,18 @@ function App() {
   const [pendingAction, setPendingAction] = useState(null); // { id, action: 'roll'|'close' }
   const [editChainId, setEditChainId] = useState(null); // id de la posición cuya cadena (aperturas/rolls/cierre) se edita
   const editChainPos = editChainId ? positions.find((x) => x.id === editChainId) : null;
+  const [editLotsId, setEditLotsId] = useState(null); // id de la posición de acciones cuyos lotes se editan
+  const editLotsPos = editLotsId ? positions.find((x) => x.id === editLotsId) : null;
+  const [editDivId, setEditDivId] = useState(null); // id de la posición cuyos dividendos se editan
+  const editDivPos = editDivId ? positions.find((x) => x.id === editDivId) : null;
   const savePositionEdit = (next) => setPositions((ps) => ps.map((p) => (p.id === next.id ? next : p)));
   const sheetPos = sheetPosId ? positions.find((x) => x.id === sheetPosId) : null;
   const openSheet = (p) => { setSheetPosId(p.id); setSheetConfirmDel(false); };
   const sheetDo = (action) => {
     if (!sheetPos) return;
     if (action === "edit") { setEditSet((s) => new Set(s).add(sheetPos.id)); }
+    if (action === "lotes") { setEditLotsId(sheetPos.id); }
+    if (action === "dividendos") { setEditDivId(sheetPos.id); }
     if (action === "roll" || action === "close") { setPendingAction({ id: sheetPos.id, action }); } /* roll/cierre: hoja propia, sin abrir el menú de edición */
     if (action === "reopen") { reopenPos(sheetPos.id); }
     setSheetPosId(null);
@@ -4136,10 +4514,26 @@ function App() {
      · Short PUT asignada → se crea automáticamente una posición de acción en B1 (Long Stock) con coste base
        = el BEP que había hasta la fecha (strike − prima acumulada), la cantidad de acciones asignadas y el
        mismo broker. La opción queda cerrada y archivada con su cadena. */
-  const closePos = (id, { date, price, comision, note, longPrice, longComision, exercised }) => {
+  const closePos = (id, { date, price, comision, note, longPrice, longComision, exercised, partial, qtyPart }) => {
     setPositions((ps) => {
       const tgt = ps.find((p) => p.id === id);
       const closeDate = date || new Date().toISOString().slice(0, 10);
+      /* cierre PARCIAL de acciones (v5.26): vende qtyPart acciones por FIFO, registra cada parcela en soldLots
+         (→ Movimientos/MTM) y deja el resto abierto. Si se venden todas, la posición queda cerrada. */
+      if (partial && tgt && natOf(tgt) === "ACC") {
+        const total = n(tgt.qty);
+        const Q = Math.min(n(qtyPart) || total, total);
+        if (Q <= 0) return ps;
+        const baseLots = hasLots(tgt) ? tgt.lots : [{ id: "l" + Math.random().toString(36).slice(2, 6), date: tgt.entryDate || "", qty: String(total), price: String(n(effBep(tgt))) }];
+        const { outLots, sales } = fifoSell(baseLots, Q, price, closeDate, comision);
+        const merged = [...sales, ...(Array.isArray(tgt.soldLots) ? tgt.soldLots : [])];
+        const remainingQty = outLots.reduce((s, l) => s + n(l.qty), 0);
+        const applied = applyLots(tgt, outLots);
+        const updated = remainingQty <= 0
+          ? { ...applied, qty: "0", soldLots: merged, closed: true, closeDate, closePrice: "", closeComision: "", closeNote: note || "" }
+          : { ...applied, soldLots: merged, closed: false };
+        return ps.map((p) => (p.id === id ? updated : p));
+      }
       let next = ps.map((p) => (p.id === id ? { ...p, closed: true, closeDate: date, closePrice: price, closeComision: comision, closeNote: note || "", closeLongPrice: longPrice != null ? longPrice : "", closeLongComision: longComision != null ? longComision : "", exercised: !!exercised } : p));
       /* asignación de short put → nueva acción en B1 al BEP vigente */
       if (exercised && tgt && natOf(tgt) === "CRED" && tgt.right === "P" && !isPMCC(tgt)) {
@@ -4755,7 +5149,7 @@ function App() {
         {isBlockTab ? (
           <BlockCard blk={blk} positions={blockPositions} nlv={nlv} showPnl={showPnl} togglePnl={togglePnl} brokers={brokers}
             editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} rollPos={rollPos} closePos={closePos} reopenPos={reopenPos}
-            onOpenSheet={openSheet} pendingAction={pendingAction} clearPending={() => setPendingAction(null)} coveredMap={coveredMap} onEditChain={setEditChainId} />
+            onOpenSheet={openSheet} pendingAction={pendingAction} clearPending={() => setPendingAction(null)} coveredMap={coveredMap} onEditChain={setEditChainId} onEditLots={setEditLotsId} />
         ) : activeTab === "rendimiento" ? (
           <RendimientoCard snapshots={snapshots} flows={flows} onSave={saveSnapshot} onDelete={deleteSnapshot} />
         ) : activeTab === "aportaciones" ? (
@@ -4774,7 +5168,7 @@ function App() {
 
         {view === "vencimientos" && <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />}
 
-        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} onEditChain={setEditChainId} />}
+        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} onEditChain={setEditChainId} onEditLots={setEditLotsId} onEditDiv={setEditDivId} />}
 
         {view === "ajustes" && (
           <div style={{ display: "grid", gap: 16 }}>
@@ -4991,6 +5385,23 @@ function App() {
                 <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Restaurar una copia sobrescribe los datos actuales con los de esa versión y recarga la app. Se guardan las 3 últimas.</div>
               </div>
             )}
+            {manualBackups.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>Copias que has guardado</div>
+                <div style={{ display: "grid", gap: 7 }}>
+                  {manualBackups.map((bk) => (
+                    <div key={bk.ts} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: T.tile, borderRadius: 12, padding: "9px 11px" }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>{new Date(bk.ts).toLocaleString("es-ES", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</div>
+                        <div style={{ fontSize: 11, color: T.sub, fontWeight: 600 }}>Copia JSON guardada · v{bk.appVersion}</div>
+                      </div>
+                      <button onClick={() => restoreManualBackup(bk)} style={{ flexShrink: 0, background: confirmManualBk === bk.ts ? T.red : T.card, border: "none", borderRadius: 10, padding: "8px 12px", fontSize: 12, fontWeight: 800, color: confirmManualBk === bk.ts ? "#fff" : T.ink, cursor: "pointer", boxShadow: T.shadow }}>{confirmManualBk === bk.ts ? "¿Seguro? Restaurar" : "Restaurar"}</button>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ fontSize: 10.5, color: T.sub, lineHeight: 1.45, marginTop: 7 }}>Cada vez que copias o descargas un backup se guarda aquí un punto de restauración con su fecha y hora. Se conservan los 8 últimos.</div>
+              </div>
+            )}
             <div style={{ textAlign: "center", marginTop: 12 }}>
               <button onClick={() => setBackupOpen(false)} style={{ background: "transparent", border: "none", fontSize: 14, fontWeight: 600, color: T.sub, cursor: "pointer" }}>Cerrar</button>
             </div>
@@ -5001,6 +5412,12 @@ function App() {
 
       {/* EDITOR DE APERTURAS / ROLLS / CIERRE */}
       {editChainPos && <RollChainEditor p={editChainPos} onSave={savePositionEdit} onClose={() => setEditChainId(null)} />}
+
+      {/* EDITOR DE LOTES DE ACCIONES/ETF */}
+      {editLotsPos && <LotsEditor p={editLotsPos} onSave={savePositionEdit} onClose={() => setEditLotsId(null)} />}
+
+      {/* EDITOR DE DIVIDENDOS */}
+      {editDivPos && <DividendsEditor p={editDivPos} onSave={savePositionEdit} onClose={() => setEditDivId(null)} />}
 
       {/* NAV INFERIOR FLOTANTE */}
       {/* ACTION SHEET DE POSICIÓN */}
@@ -5054,6 +5471,8 @@ function App() {
                 </div>
               </div>
               <div style={{ display: "grid", gap: 8 }}>
+                {!p.closed && nat === "ACC" && <ActionBtn icon="📦" label="Lotes" sub="Ver lotes por fecha · editar · vender · añadir" color={T.purple} onClick={() => sheetDo("lotes")} />}
+                {nat === "ACC" && <ActionBtn icon="💰" label="Dividendos" sub="Registrar cobros · van a Primas y MTM" color={T.green} onClick={() => sheetDo("dividendos")} />}
                 {!p.closed && <ActionBtn icon="✎" label="Editar" sub="Modificar cualquier campo de la posición" onClick={() => sheetDo("edit")} />}
                 {canRollP && <ActionBtn icon="🔄" label="Rolar" sub={"Recompra + nueva venta · " + (p.rollChain || []).length + " roll" + ((p.rollChain || []).length === 1 ? "" : "s") + " hasta ahora"} color={T.purple} onClick={() => sheetDo("roll")} />}
                 {canCloseP && <ActionBtn icon="✕" label="Cerrar posición" sub="Registra el cierre con fecha, precio y comisión" onClick={() => sheetDo("close")} />}
@@ -5235,6 +5654,22 @@ function App() {
                 )}
                 {(wizNat === "ACC" || wizNat === "CASH") && (
                   <>
+                    {wizNat === "ACC" && (() => {
+                      /* v5.22: si el ticker ya existe como acciones abiertas, ofrece añadir un lote en vez de duplicar */
+                      const key = (wizForm.tkr || "").trim().toUpperCase();
+                      if (!key) return null;
+                      const matches = positions.filter((x) => natOf(x) === "ACC" && !x.closed && (x.tkr || "").trim().toUpperCase() === key);
+                      if (!matches.length) return null;
+                      const m = matches.find((x) => x.broker === wizForm.broker) || matches[0];
+                      const b = BLOCKS.find((bb) => bb.id === m.block);
+                      return (
+                        <div style={{ background: T.tileAmber, borderRadius: 12, padding: "10px 12px", marginBottom: 2 }}>
+                          <div style={{ fontSize: 12, fontWeight: 800, color: T.gold, marginBottom: 3 }}>Ya tienes {key} en acciones</div>
+                          <div style={{ fontSize: 11.5, color: T.ink, fontWeight: 600, lineHeight: 1.45, marginBottom: 8 }}>{m.broker}{b ? " · " + b.name.replace("Bloque ", "B") : ""} · {n(m.qty)} acc · BEP ${money2(effBep(m))}. Añade un lote a esa posición en vez de crear una duplicada.</div>
+                          <button onClick={() => { setWizOpen(false); setEditLotsId(m.id); }} style={{ background: T.dark, border: "none", borderRadius: 10, padding: "9px 14px", fontSize: 12.5, fontWeight: 800, color: "#fff", cursor: "pointer" }}>📦 Añadir lote a {key}</button>
+                        </div>
+                      );
+                    })()}
                     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                       <WizInput label="Cantidad (acciones)" value={wizForm.qty} onChange={wizF("qty")} inputMode="numeric" />
                       <WizInput label="BEP (coste medio)" value={wizForm.bep} onChange={wizF("bep")} inputMode="decimal" />
