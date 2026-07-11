@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.32";
+const APP_VERSION = "5.33";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -3911,6 +3911,7 @@ function App() {
   const [flows, setFlows] = useState([]);
   const [autoBackups, setAutoBackups] = useState([]);
   const [updateNotice, setUpdateNotice] = useState(null);
+  const [loadDiag, setLoadDiag] = useState(null); // v5.33: diagnóstico de carga (nº posiciones en cada almacén)
   const [confirmAutoBk, setConfirmAutoBk] = useState(null);
   const [manualBackups, setManualBackups] = useState([]); // copias JSON guardadas por el usuario (restaurables)
   const [confirmManualBk, setConfirmManualBk] = useState(null);
@@ -3999,6 +4000,7 @@ function App() {
         } else {
           finalPos = idbPos || lsPos;
         }
+        setLoadDiag({ ls: lsPos ? lsPos.length : 0, idb: idbPos ? idbPos.length : 0, merged: finalPos ? finalPos.length : 0 });
         if (finalPos) { setPositions(withNat(finalPos)); havePos = true; }
       } catch (e) {}
       try { const tr = await idbGet(KEY_TRADES); if (tr != null) { const arr = JSON.parse(tr); if (Array.isArray(arr)) { setTrades(arr); haveTr = true; } } } catch (e) {}
@@ -5110,6 +5112,7 @@ function App() {
         {updateNotice && (
           <div style={{ background: T.tileGreen, borderRadius: 14, padding: "10px 12px", marginBottom: 12 }}>
             <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700, lineHeight: 1.45 }}>App actualizada a v{updateNotice.to} (antes {updateNotice.from}). Se guardó una copia automática de tus datos por seguridad{updateNotice.count != null ? " (" + updateNotice.count + " posiciones)" : ""}.</div>
+            {loadDiag && <div style={{ fontSize: 11, color: T.sub, fontWeight: 700, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>Diagnóstico: localStorage {loadDiag.ls} · IndexedDB {loadDiag.idb} · fusión {loadDiag.merged} · en pantalla {positions.length} posiciones</div>}
             <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, lineHeight: 1.45, marginTop: 3 }}>Si tras la actualización algo no cuadra o faltan datos, restaura la copia desde Backup → Copias automáticas.</div>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button onClick={() => { setUpdateNotice(null); openBackup(); }} style={{ background: T.dark, border: "none", borderRadius: 10, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "#fff", cursor: "pointer" }}>Ver copias</button>
