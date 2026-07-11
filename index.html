@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.60";
+const APP_VERSION = "5.61";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1079,8 +1079,8 @@ function InfoModal({ type, onClose }) {
     title: "Vencimientos",
     body: "Agrupa solo las opciones (no las acciones) por fecha de vencimiento y suma el mismo Riesgo total que usas en el resto de la app (para CRED es BEP × cantidad, igual que el Notional del Comparador). Así el capital en riesgo de cada fecha es directamente comparable con el de un bloque o un subyacente — no es el desembolso por asignación (eso sería Strike × cantidad, siempre algo mayor porque no descuenta la prima ya cobrada).",
   } : {
-    title: "Apalancamiento (MKT VL / NLV)",
-    body: "Mide cuánta exposición total tienes respecto al valor real de la cuenta, sumando el market value de las posiciones filtradas.",
+    title: "Apalancamiento (Invertido / NLV)",
+    body: "Mide cuánto capital tienes desplegado en riesgo (market value de las posiciones, sin contar el cash de B0) respecto al valor real de la cuenta (NLV). Por debajo de 1× tienes parte de la cuenta en liquidez; por encima de 1× estás usando margen.",
   };
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(20,16,10,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 50, overflowY: "auto" }}>
@@ -4729,20 +4729,23 @@ function App() {
      esto; las cerradas siguen visibles en su bloque (para poder reabrirlas) y en Movimientos (su historial). */
   const active = useMemo(() => filtered.filter((p) => !p.closed), [filtered]);
 
-  const mktvl = useMemo(() => active.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0), [active]);
-  /* posiciones Cash de B0: cuentan como cash del estado de cuenta (no como MKT VL) para no duplicar ni tener que meterlo a mano */
+  /* MKT VL (v5.61): el valor de mercado TOTAL de la cuenta incluye las posiciones Cash de B0 — son
+     posiciones con valor de mercado como cualquier otra. Para las señales de riesgo (apalancamiento y
+     % de concentración) se usa mktvlInv (solo lo invertido, ex-cash), que es el numerador con sentido:
+     cuánto capital está desplegado en riesgo respecto al NLV. */
+  const mktvlInv = useMemo(() => active.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0), [active]);
+  /* posiciones Cash de B0: cuentan como cash del estado de cuenta y en el MKT VL total */
   const posCash = useMemo(() => active.reduce((s, p) => s + (isCashNat(p) ? effMkt(p) : 0), 0), [active]);
+  const mktvl = mktvlInv + posCash;
   const sumField = (field) => brokers.reduce((s, b) => s + n((accounts[b] || {})[field]), 0);
   const manualCash = broker === "Todos" ? sumField("cash") : n((accounts[broker] || {}).cash);
   const cash = manualCash + posCash;
   const margin = broker === "Todos" ? sumField("margin") : n((accounts[broker] || {}).margin);
-  /* NLV (v5.15): el MKT VL ya incluye la liquidez que llevas como posición (ETF/money market de B0), así que
-     sumar además el cash manual positivo lo contaría dos veces. Regla nueva: NLV = MKT VL + posiciones Cash de
-     B0 (que sí quedan fuera del MKT VL) + SOLO el cash manual NEGATIVO (débito de margen, que rebaja el NLV).
-     Cash manual positivo no se suma → con cash ≥ 0 y sin posiciones Cash, NLV = MKT VL. */
-  const nlv = mktvl + posCash + Math.min(manualCash, 0);
+  /* NLV: MKT VL total (ya incluye el cash de B0) + solo el cash manual NEGATIVO (débito de margen).
+     El cash manual positivo no se suma (se asume liquidez ya reflejada como posición). */
+  const nlv = mktvl + Math.min(manualCash, 0);
   const el = nlv - margin;
-  const leverage = nlv !== 0 ? mktvl / nlv : NaN;
+  const leverage = nlv !== 0 ? mktvlInv / nlv : NaN;
   const elNlv = nlv !== 0 ? el / nlv : NaN;
   const elMrgn = margin !== 0 ? el / margin : NaN;
   const totalPnl = useMemo(() => active.reduce((s, p) => s + effPnl(p), 0), [active]);
@@ -5184,14 +5187,14 @@ function App() {
     const pool = isBlockTab ? blockPositions.filter((p) => !p.closed) : active;
     let denom = nlv, denomLabel = "NLV", getValue = (p) => capDesplegado(p);
     if (chartScope === "Bloque") { denom = blockTotals[activeTab] || 0; denomLabel = "del " + (blk ? blk.name : ""); }
-    else if (chartScope === "MKT VL") { denom = mktvl; denomLabel = "MKT VL"; }
+    else if (chartScope === "MKT VL") { denom = mktvlInv; denomLabel = "MKT VL (invertido)"; }
     else if (chartScope === "NLV") { denom = nlv; denomLabel = "NLV"; }
     else { denom = margin; denomLabel = "del margen usado"; getValue = effMargen; }
     const agg = aggregateByTicker(pool, getValue);
     const poolTotal = agg.reduce((s, x) => s + x.value, 0);
     const slices = agg.map((x, i) => ({ ...x, color: PALETTE[i % PALETTE.length], pctAbs: denom ? x.value / denom : NaN }));
     return { slices, total: poolTotal, denomPct: denom ? poolTotal / denom : NaN, denomLabel };
-  }, [chartScope, activeTab, active, nlv, mktvl, margin, blockPositions, blockTotals, isBlockTab, blk, isDark]);
+  }, [chartScope, activeTab, active, nlv, mktvlInv, margin, blockPositions, blockTotals, isBlockTab, blk, isDark]);
 
   const scopeOptions = isBlockTab ? ["Bloque", "MKT VL", "NLV", "Margen"] : ["MKT VL", "NLV", "Margen"];
 
@@ -5235,7 +5238,7 @@ function App() {
       }).sort((a, b) => a.block - b.block || (a.isOpt === b.isOpt ? 0 : a.isOpt ? 1 : -1));
       return {
         ...r,
-        pctMktvl: mktvl ? r.riesgo / mktvl : NaN,
+        pctMktvl: mktvlInv ? r.riesgo / mktvlInv : NaN,
         pctNlv: nlv ? r.riesgo / nlv : NaN,
         pctMargen: margin ? r.margen / margin : NaN,
         pnlPct: r.pnlBasis ? r.pnl / r.pnlBasis : NaN,
@@ -5246,7 +5249,7 @@ function App() {
         detailRows,
       };
     });
-  }, [active, mktvl, nlv, margin, isDark]);
+  }, [active, mktvlInv, nlv, margin, isDark]);
 
   /* mapa id-de-acción → lista de covered call(s) abiertas que la cubren (ordenadas por vencimiento):
      alimenta el banner "COVERED" en la fila de la acción en B1, una línea por call. Usa el enlace
@@ -5321,12 +5324,13 @@ function App() {
   const [exportCopied, setExportCopied] = useState(false);
 
   const buildExportText = () => {
-    const mktvlAll = positions.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0);
+    const invAll = positions.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0);
     const posCashAll = positions.reduce((s, p) => s + (isCashNat(p) ? effMkt(p) : 0), 0);
+    const mktvlAll = invAll + posCashAll; /* MKT VL total = invertido + posiciones Cash B0 (v5.61) */
     const manualCashAll = brokers.reduce((s, b) => s + n((accounts[b] || {}).cash), 0);
     const cashAll = manualCashAll + posCashAll;
     const marginAll = brokers.reduce((s, b) => s + n((accounts[b] || {}).margin), 0);
-    const nlvAll = mktvlAll + posCashAll + Math.min(manualCashAll, 0);
+    const nlvAll = mktvlAll + Math.min(manualCashAll, 0);
     const elAll = nlvAll - marginAll;
     const blockTotalsAll = {};
     BLOCKS.forEach((b) => { blockTotalsAll[b.id] = positions.filter((p) => p.block === b.id).reduce((s, p) => s + capDesplegado(p), 0); });
@@ -5342,7 +5346,7 @@ function App() {
     lines.push(`Excess Liquidity: $${money(elAll)}`);
     lines.push(`EL/NLV: ${pct(nlvAll ? elAll / nlvAll : NaN)}`);
     lines.push(`EL/Margin: ${pct(marginAll ? elAll / marginAll : NaN)}`);
-    lines.push(`Apalancamiento MKT VL/NLV: ${nlvAll ? (mktvlAll / nlvAll).toFixed(2) : "—"}x`);
+    lines.push(`Apalancamiento Invertido/NLV: ${nlvAll ? (invAll / nlvAll).toFixed(2) : "—"}x`);
     lines.push("");
 
     BLOCKS.forEach((b) => {
@@ -5369,7 +5373,7 @@ function App() {
       expMap[p.tkr].margen += effMargen(p);
     });
     Object.entries(expMap).sort((a, b) => b[1].riesgo - a[1].riesgo).forEach(([tkr, v]) => {
-      lines.push(`  ${tkr}: $${money(v.riesgo)} riesgo total · MKT VL ${pct(mktvlAll ? v.riesgo / mktvlAll : NaN)} · NLV ${pct(nlvAll ? v.riesgo / nlvAll : NaN)} · Margen ${pct(marginAll ? v.margen / marginAll : NaN)}`);
+      lines.push(`  ${tkr}: $${money(v.riesgo)} riesgo total · MKT VL ${pct(invAll ? v.riesgo / invAll : NaN)} · NLV ${pct(nlvAll ? v.riesgo / nlvAll : NaN)} · Margen ${pct(marginAll ? v.margen / marginAll : NaN)}`);
     });
     lines.push("");
 
@@ -5388,15 +5392,14 @@ function App() {
   /* ---------- snapshots de rendimiento: siempre sobre la cartera completa, no el filtro actual ---------- */
   const buildSnapshot = (posArg) => {
     const pos = posArg || positions;
-    const mktvlAll = pos.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0);
+    const invAll = pos.reduce((s, p) => s + (isCashNat(p) ? 0 : effMkt(p)), 0);
     const posCashAll = pos.reduce((s, p) => s + (isCashNat(p) ? effMkt(p) : 0), 0);
+    const mktvlAll = invAll + posCashAll; /* v5.61: MKT VL total incluye posiciones Cash B0 */
     const manualCashAll = brokers.reduce((s, b) => s + n((accounts[b] || {}).cash), 0);
     const cashAll = manualCashAll + posCashAll;
     const marginAll = brokers.reduce((s, b) => s + n((accounts[b] || {}).margin), 0);
-    /* v5.15: mismo criterio que la home — el cash manual positivo no se suma al NLV (se asume ya
-       reflejado en MKT VL como posición monetaria); solo el cash negativo (margen) resta. El cash
-       explícito de posiciones B0 (posCashAll) sí cuenta. */
-    const nlvAll = mktvlAll + posCashAll + Math.min(manualCashAll, 0);
+    /* NLV: MKT VL total + solo el cash manual negativo (débito de margen). Mismo número que antes. */
+    const nlvAll = mktvlAll + Math.min(manualCashAll, 0);
     const elAll = nlvAll - marginAll;
     const blocks = {};
     BLOCKS.forEach((b) => {
@@ -5414,7 +5417,7 @@ function App() {
       date: new Date().toISOString().slice(0, 10),
       mktvl: mktvlAll, cash: cashAll, margin: marginAll, nlv: nlvAll, el: elAll,
       elNlv: nlvAll ? elAll / nlvAll : NaN, elMrgn: marginAll ? elAll / marginAll : NaN,
-      leverage: nlvAll ? mktvlAll / nlvAll : NaN,
+      leverage: nlvAll ? invAll / nlvAll : NaN,
       totalRiesgo: pos.filter((p) => p.block !== 0).reduce((s, p) => s + capDesplegado(p), 0),
       totalPlausible: pos.filter((p) => p.block !== 0).reduce((s, p) => s + plausibleOf(p), 0),
       totalPnl: pos.reduce((s, p) => s + effPnl(p), 0),
@@ -5567,13 +5570,20 @@ function App() {
               </>
             ) : (
               <>
-                <MoneyField label={"Cash manual · " + broker} value={(accounts[broker] || {}).cash} onChange={setAccField(broker, "cash")} signed />
+                <Tile label={"Cash · " + broker} value={(cash < 0 ? "-$" : "$") + money(Math.abs(cash))} tone={cash < 0 ? "red" : undefined} />
                 <MoneyField label={"Margin · " + broker} value={(accounts[broker] || {}).margin} onChange={setAccField(broker, "margin")} />
               </>
             )}
           </div>
+          {broker !== "Todos" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
+              <MoneyField label={"Cash manual (ajuste) · " + broker} value={(accounts[broker] || {}).cash} onChange={setAccField(broker, "cash")} signed />
+              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600, lineHeight: 1.4, alignSelf: "center", padding: "0 2px" }}>El cash de B0 (${money(posCash)}) ya se suma solo. Usa este campo para cash suelto o negativo (margen).</div>
+            </div>
+          )}
+          {posCash > 0 && manualCash < 0 && <div style={{ fontSize: 11, fontWeight: 700, color: T.red, background: T.tileRed, borderRadius: 10, padding: "8px 10px", marginBottom: 9, lineHeight: 1.45 }}>⚠️ Tienes cash en B0 (${money(posCash)}) y a la vez cash manual negativo (−${money(Math.abs(manualCash))}). Eso no debería pasar: el broker consumiría antes la liquidez. Revisa los datos.</div>}
           {broker !== "Todos" && <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginBottom: 9, background: T.tile, borderRadius: 10, padding: "8px 10px", lineHeight: 1.45, textAlign: "justify" }}>💡 Introduce el <b>cash negativo</b> si lo hubiera (débito de margen) y el <b>margen</b> tal como lo muestra tu broker (Maintenance Margin en IBKR).</div>}
-          {posCash !== 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Cash = manual {(manualCash < 0 ? "-$" : "$") + money(Math.abs(manualCash))} + posiciones Cash B0 {(posCash < 0 ? "-$" : "$") + money(Math.abs(posCash))} → total {(cash < 0 ? "-$" : "$") + money(Math.abs(cash))}. Las posiciones Cash de B0 ya cuentan aquí (no en MKT VL): no las dupliques en el cash manual.</div>}
+          {posCash !== 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Cash = manual {(manualCash < 0 ? "-$" : "$") + money(Math.abs(manualCash))} + posiciones Cash B0 {(posCash < 0 ? "-$" : "$") + money(Math.abs(posCash))} → total {(cash < 0 ? "-$" : "$") + money(Math.abs(cash))}. Las posiciones Cash de B0 ya cuentan en el Cash y en el MKT VL: no las dupliques en el cash manual.</div>}
           {manualCash > 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>El cash manual positivo (${money(manualCash)}) no se suma al NLV: se asume que tu liquidez ya está en el MKT VL como posición (ETF/money market). Solo un cash manual negativo (margen) rebaja el NLV.</div>}
           {broker === "Todos" && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Elige un broker arriba para editar su cash/margin. Toca ⚙ para añadir o quitar brokers.</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 9, marginBottom: 14 }}>
@@ -5581,7 +5591,7 @@ function App() {
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", padding: "0 2px", marginBottom: 14 }}>
-            <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 5 }}>Apalancamiento · MKT VL / NLV <InfoDot onClick={() => setInfo("leverage")} /></span>
+            <span style={{ fontSize: 12.5, color: T.sub, fontWeight: 600, display: "inline-flex", alignItems: "center", gap: 5 }}>Apalancamiento · Invertido / NLV <InfoDot onClick={() => setInfo("leverage")} /></span>
             <span style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{isFinite(leverage) ? leverage.toFixed(2) + "×" : "—"}</span>
           </div>
 
