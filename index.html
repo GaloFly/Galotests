@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.31";
+const APP_VERSION = "5.32";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -3876,6 +3876,12 @@ function App() {
   };
   const [accounts, setAccounts] = useState(SEED_ACC);
   const [positions, setPositions] = useState(SEED_POS);
+  /* v5.31: ref siempre-actual con las posiciones. runRefresh es async (tarda segundos bajando precios) y antes
+     capturaba `positions` por cierre; si arrancaba con una versión previa a la fusión de carga, al terminar
+     escribía esa versión pequeña ENCIMA de las posiciones ya fusionadas → borraba movimientos/estrategias.
+     Con la ref (y setPositions funcional) siempre parte del estado más reciente. */
+  const positionsRef = useRef(positions);
+  positionsRef.current = positions;
   const [broker, setBroker] = useState("Todos");
   const [activeTab, setActiveTab] = useState(0);
   const [chartScope, setChartScope] = useState("Bloque");
@@ -4240,7 +4246,7 @@ function App() {
 
   const runRefresh = async (key) => {
     setRefreshing(true); setRefreshMsg("");
-    const tickers = [...new Set(positions.map((p) => p.tkr).filter(Boolean))];
+    const tickers = [...new Set(positionsRef.current.map((p) => p.tkr).filter(Boolean))];
     const results = {};
     const errors = {};
     for (const t of tickers) {
@@ -4249,8 +4255,11 @@ function App() {
       else errors[res.error] = (errors[res.error] || 0) + 1;
       await new Promise((r) => setTimeout(r, 150));
     }
-    const nextPositions = positions.map((p) => (results[p.tkr] != null ? { ...p, last: String(results[p.tkr]) } : p));
-    setPositions(nextPositions);
+    /* v5.31: aplica los precios sobre el estado MÁS RECIENTE (ref + updater funcional), nunca sobre la copia
+       capturada al empezar. Así, si durante la descarga terminó la carga/fusión de posiciones, no se pierde
+       ninguna: solo se actualiza `last` de las que hay ahora. */
+    const nextPositions = positionsRef.current.map((p) => (results[p.tkr] != null ? { ...p, last: String(results[p.tkr]) } : p));
+    setPositions((prev) => prev.map((p) => (results[p.tkr] != null ? { ...p, last: String(results[p.tkr]) } : p)));
     setRefreshing(false);
     const found = Object.keys(results).length;
     if (found > 0) {
@@ -4274,12 +4283,12 @@ function App() {
      posiciones y key ya están en el estado — runRefresh captura las posiciones correctas y el snapshot
      no machaca datos. Solo se dispara una vez por arranque. */
   useEffect(() => {
-    if (pendingAutoRefresh && apiKey && !refreshing) {
+    if (pendingAutoRefresh && apiKey && !refreshing && loaded) {
       setPendingAutoRefresh(false);
       setRefreshChoiceOpen(false); /* seguridad: si algo dejó la hoja abierta, se cierra al lanzar la descarga */
       runRefresh(apiKey);
     }
-  }, [pendingAutoRefresh, apiKey]);
+  }, [pendingAutoRefresh, apiKey, loaded]);
   /* tirar de la página hacia abajo = refrescar precios directamente (sin el modal de elegir acción:
      el gesto ya es una intención inequívoca). Si no hay key guardada, abre el modal para pedirla,
      igual que la primera vez que se toca el botón "🔄 Precios". */
