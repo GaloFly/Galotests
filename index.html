@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.28";
+const APP_VERSION = "5.29";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -156,6 +156,14 @@ function saveKV(key, obj) {
   const s = JSON.stringify(obj);
   try { localStorage.setItem(key, s); } catch (e) {}
   idbSet(key, s);
+}
+/* unión por id de dos listas de posiciones (primary manda en ids compartidos). Ninguna posición que exista en
+   cualquiera de las dos se pierde. Se usa al cargar para reconciliar IndexedDB (primary) y localStorage. */
+function mergePositionsById(primary, secondary) {
+  const a = Array.isArray(primary) ? primary : null;
+  const b = Array.isArray(secondary) ? secondary : null;
+  if (a && b) { const m = new Map(); b.forEach((x) => { if (x && x.id) m.set(x.id, x); }); a.forEach((x) => { if (x && x.id) m.set(x.id, x); }); return [...m.values()]; }
+  return a || b || null;
 }
 
 const n = (v) => { if (v === "" || v == null) return 0; const x = Number(String(v).replace(",", ".")); return isNaN(x) ? 0 : x; };
@@ -3911,10 +3919,14 @@ function App() {
        movimientos/estrategias/MTM (todo eso se deriva de las posiciones). Ahora cada clave se lee de localStorage o,
        si falta, de IndexedDB, y la lista de copias se guarda en IndexedDB (autoritativo) + localStorage (best-effort). */
     const stored = (() => { try { return localStorage.getItem(KEY_APPVER); } catch (e) { return null; } })();
-    let haveAcc = false, havePos = false;
+    /* v5.29: pide almacenamiento PERSISTENTE. En un PWA de iOS/Safari, IndexedDB y localStorage pueden ser
+       DESALOJADOS por el sistema (por inactividad o presión de almacenamiento) — esa es una causa de que "la
+       actualización borre" movimientos/estrategias, que se derivan de las posiciones. persist() evita el desalojo. */
+    try { if (typeof navigator !== "undefined" && navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {}); } catch (e) {}
+    let haveAcc = false, havePos = false, lsPos = null;
     try { const f = localStorage.getItem(KEY_FLOWS); if (f) { const arr = JSON.parse(f); if (Array.isArray(arr)) setFlows(arr); } } catch (e) {}
     try { const a = localStorage.getItem(KEY_ACC); if (a) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
-    try { const p = localStorage.getItem(KEY_POS); if (p) { setPositions(withNat(JSON.parse(p))); havePos = true; } } catch (e) {}
+    try { const p = localStorage.getItem(KEY_POS); if (p) { const arr = JSON.parse(p); if (Array.isArray(arr)) { lsPos = arr; setPositions(withNat(arr)); havePos = true; } } } catch (e) {}
     try { const k = localStorage.getItem(KEY_FINNHUB); if (k) setApiKey(k); } catch (e) {}
     /* al abrir la app (v5.05): si hay API key guardada, los precios se descargan DIRECTAMENTE, sin pasar
        por la hoja de "Actualizar precios / Cambiar key" — esa hoja solo aparece si se pulsa el botón.
@@ -3935,7 +3947,22 @@ function App() {
          (que recarga la app) no revierte a un localStorage antiguo ni lo vuelve a grabar encima de IDB, que es
          justo lo que borraba movimientos/estrategias/MTM. */
       try { const a = await idbGet(KEY_ACC); if (a != null) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
-      try { const p = await idbGet(KEY_POS); if (p != null) { const arr = JSON.parse(p); if (Array.isArray(arr)) { setPositions(withNat(arr)); havePos = true; } } } catch (e) {}
+      try {
+        const p = await idbGet(KEY_POS);
+        let idbPos = null;
+        if (p != null) { const arr = JSON.parse(p); if (Array.isArray(arr)) idbPos = arr; }
+        /* UNIÓN POR ID (v5.29): la posición sobrevive si existe en CUALQUIERA de las dos fuentes. IDB manda en
+           los campos de las posiciones compartidas (es la fresca), pero una posición que solo esté en localStorage
+           (p. ej. cerrada hace tiempo y ya no cabía en un IDB desalojado/truncado, o al revés) NO se pierde. Esto
+           evita que una fuente recortada borre movimientos/estrategias al recargar tras una actualización. */
+        let finalPos = null;
+        if (idbPos && lsPos) {
+          finalPos = mergePositionsById(idbPos, lsPos);
+        } else {
+          finalPos = idbPos || lsPos;
+        }
+        if (finalPos) { setPositions(withNat(finalPos)); havePos = true; }
+      } catch (e) {}
       try { const tr = await idbGet(KEY_TRADES); if (tr != null) { const arr = JSON.parse(tr); if (Array.isArray(arr)) { setTrades(arr); haveTr = true; } } } catch (e) {}
       try { const s = await idbGet(KEY_SNAP); if (s != null) { const arr = JSON.parse(s); if (Array.isArray(arr)) setSnapshots(arr); } } catch (e) {}
       try { const fl = await idbGet(KEY_FLOWS); if (fl != null) { const arr = JSON.parse(fl); if (Array.isArray(arr)) setFlows(arr); } } catch (e) {}
