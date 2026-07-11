@@ -79,7 +79,7 @@ function applyTheme(dark) {
     { id: 3, name: "Bloque 3", tag: "High Risk", desc: "Earnings · 0DTE · spreads", color: T.orange, bg: T.tileAmber, badge: T.orange,
       tMin: 0.00, tMax: 0.05, scaleMin: 0, scaleMax: 0.15, band: 0.03 },
   ];
-  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "rendimiento", label: "Rendimiento", color: T.gold }, { id: "aportaciones", label: "Aportaciones", color: T.green }];
+  TABS = [...BLOCKS.map((b) => ({ id: b.id, label: b.name.replace("Bloque ", "B") + " · " + b.tag, color: b.color })), { id: "exposicion", label: "Exposición", color: T.dark }, { id: "aportaciones", label: "Aportaciones", color: T.green }];
 }
 applyTheme(false);
 const RULES = { elNlv: { green: 0.4, amber: 0.25 }, elMrgn: { green: 1.0, amber: 0.5 } };
@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.39";
+const APP_VERSION = "5.42";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -630,6 +630,105 @@ function buildTradeFromGemini(data, file) {
   const popN = n(data.pop);
   const pop = isFinite(popN) && popN > 0 && popN <= 100 ? String(Math.round(popN * 10) / 10) : "";
   return { tkr, strike, dte, credit, margin, right, expiry, underlying, delta, pop, ask: askOk ? ask : null, bid: bidOk ? bid : null };
+}
+/* ---------- lector MULTI-PATA para el asistente de posiciones ----------
+   lee una captura de orden/ejecución del bróker con una o varias patas de opción y devuelve cada
+   pata (right, strike, expiry, acción compra/venta, cantidad y precio por acción). Comparte la
+   fontanería de visión de Gemini con el lector del Comparador pero con esquema de varias patas. */
+async function extractLegsFromImage(file, apiKey, model) {
+  let b64, mime;
+  try { b64 = await resizeImageToBase64(file, OCR_MAX_DIM); mime = "image/png"; }
+  catch (e) { b64 = await fileToBase64(file); mime = file.type && file.type.startsWith("image/") ? file.type : "image/png"; }
+  const schema = { type: "object", properties: {
+    ticker: { type: "string" },
+    legs: { type: "array", items: { type: "object", properties: {
+      right: { type: "string", description: "'C' si es Call, 'P' si es Put" },
+      strike: { type: "number" },
+      expiry: { type: "string", description: "vencimiento en formato YYYY-MM-DD" },
+      action: { type: "string", description: "'Sold' si es venta/short, 'Bought' si es compra/long" },
+      qty: { type: "number" },
+      price: { type: "number", description: "precio POR ACCIÓN de la opción (ej. 2.35), no el total en dólares (ej. 235)" }
+    } } }
+  } };
+  const prompt = [
+    "Esta es una captura de una app de bróker con una o varias PATAS de opción (una orden combinada o una lista de ejecuciones).",
+    "Extrae el ticker del subyacente y CADA pata que aparezca. Para cada pata:",
+    "- right: 'C' para Call, 'P' para Put.",
+    "- strike: precio de ejercicio (ej. 750).",
+    "- expiry: vencimiento en formato YYYY-MM-DD. Interpreta \"JUL 17 '26\" = 2026-07-17.",
+    "- action: 'Sold' si la pata es venta (Sold/Sell/Short), 'Bought' si es compra (Bought/Buy/Long).",
+    "- qty: número de contratos (ej. 1).",
+    "- price: precio POR ACCIÓN de la opción, ej. 2.35. Si además aparece un total como '$235' (precio × 100), NO uses ese; usa el precio por acción (2.35).",
+    "Devuelve TODAS las patas reconocibles dentro del array 'legs'. Omite cualquier campo que no veas con claridad. Devuelve ÚNICAMENTE el JSON, sin texto adicional."
+  ].join("\n");
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/" + (model || GEMINI_MODEL) + ":generateContent?key=" + encodeURIComponent(apiKey);
+  const body = { contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
+    generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: schema } };
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!r.ok) {
+    let detail = "HTTP " + r.status; let retryAfterMs = null;
+    try {
+      const e = await r.json();
+      if (e && e.error && e.error.message) detail = e.error.message;
+      if (e && e.error && Array.isArray(e.error.details)) {
+        const ri = e.error.details.find((d) => d["@type"] && String(d["@type"]).indexOf("RetryInfo") >= 0);
+        if (ri && ri.retryDelay) { const m = String(ri.retryDelay).match(/([\d.]+)s/); if (m) retryAfterMs = Math.ceil(parseFloat(m[1]) * 1000); }
+      }
+    } catch (_) {}
+    if (retryAfterMs == null) { const m = detail.match(/retry in ([\d.]+)\s*s/i); if (m) retryAfterMs = Math.ceil(parseFloat(m[1]) * 1000); }
+    if (r.status === 400 || r.status === 403) detail = "key inválida o sin permiso (" + detail + ")";
+    if (r.status === 429) detail = "límite diario/por minuto agotado (" + detail + ")";
+    const err = new Error(detail); err.status = r.status; if (retryAfterMs != null) err.retryAfterMs = retryAfterMs; throw err;
+  }
+  const j = await r.json();
+  const parts = j && j.candidates && j.candidates[0] && j.candidates[0].content && j.candidates[0].content.parts;
+  const txt = (parts || []).map((p) => p.text || "").join("");
+  try { return JSON.parse(txt); } catch (_) { throw new Error("respuesta no-JSON del modelo"); }
+}
+/* mapea las patas leídas a los campos del asistente según la estrategia elegida.
+   DC/DD: cada pata a su lado (put/call) y dirección (Sold=short, Bought=long), con vto corto y largo.
+   Credit spreads: solo el ticker (los spreads se rellenan a mano). Resto: primera pata como principal. */
+function mapLegsToWizForm(result, wizStrat) {
+  const out = {};
+  const tkr = ((result && result.ticker) || "").toUpperCase().replace(/[^A-Z.]/g, "").slice(0, 8);
+  if (tkr) out.tkr = tkr;
+  const raw = result && Array.isArray(result.legs) ? result.legs : [];
+  const legs = raw.map((l) => ({
+    right: (l && (l.right === "P" || /^p/i.test(l.right || ""))) ? "P" : (l && (l.right === "C" || /^c/i.test(l.right || ""))) ? "C" : "",
+    strike: n(l && l.strike) > 0 ? String(n(l.strike)) : "",
+    expiry: (l && typeof l.expiry === "string" && /^\d{4}-\d{2}-\d{2}$/.test(l.expiry)) ? l.expiry : "",
+    sold: /sold|sell|short/i.test((l && l.action) || ""),
+    qty: n(l && l.qty) > 0 ? String(Math.round(n(l.qty))) : "",
+    price: n(l && l.price) > 0 ? String(Math.round(n(l.price) * 1000) / 1000) : "",
+  })).filter((l) => l.right);
+  if (DCDD_STRATS.has(wizStrat)) {
+    const pick = (right, sold) => legs.find((l) => l.right === right && l.sold === sold);
+    const sp = pick("P", true), lp = pick("P", false), sc = pick("C", true), lc = pick("C", false);
+    if (sp) { if (sp.strike) out.spK = sp.strike; if (sp.price) out.spP = sp.price; }
+    if (lp) { if (lp.strike) out.lpK = lp.strike; if (lp.price) out.lpP = lp.price; }
+    if (sc) { if (sc.strike) out.scK = sc.strike; if (sc.price) out.scP = sc.price; }
+    if (lc) { if (lc.strike) out.lcK = lc.strike; if (lc.price) out.lcP = lc.price; }
+    const putK = (sp && sp.strike) || (lp && lp.strike) || "";
+    const callK = (sc && sc.strike) || (lc && lc.strike) || "";
+    if (putK) out.dcPutStrike = putK;
+    if (callK) out.dcCallStrike = callK;
+    const shortExp = (sp && sp.expiry) || (sc && sc.expiry) || "";
+    const longExp = (lp && lp.expiry) || (lc && lc.expiry) || "";
+    if (shortExp) out.expiry = shortExp;
+    if (longExp) out.dcExpiryLong = longExp;
+    const qty = (sp && sp.qty) || (sc && sc.qty) || (lp && lp.qty) || (lc && lc.qty) || "";
+    if (qty) out.contratos = qty;
+    return out;
+  }
+  if (CREDIT_SPREAD_STRATS.has(wizStrat)) return out; // spreads: solo ticker, el resto a mano
+  const main = legs[0];
+  if (main) {
+    if (main.right) out.right = main.right;
+    if (main.strike) out.strike = main.strike;
+    if (main.expiry) out.expiry = main.expiry;
+    if (main.price) out.prima = main.price;
+  }
+  return out;
 }
 const toneNlv = (v) => (!isFinite(v) ? "muted" : v >= RULES.elNlv.green ? "green" : v >= RULES.elNlv.amber ? "amber" : "red");
 const toneMrgn = (v) => (!isFinite(v) ? "muted" : v >= RULES.elMrgn.green ? "green" : v >= RULES.elMrgn.amber ? "amber" : "red");
@@ -1187,7 +1286,9 @@ function VencimientosCard({ rows, onOpen }) {
 /* ---------- gráfico de métrica con ejes, grid y fechas ---------- */
 const kFmt = (v) => { const a = Math.abs(v); if (a >= 1e6) return (v / 1e6).toFixed(1) + "M"; if (a >= 1e3) return Math.round(v / 1e3) + "k"; return String(Math.round(v)); };
 const shortDate = (iso) => new Date(iso + "T00:00:00").toLocaleDateString("es-ES", { day: "numeric", month: "short" });
-function MetricChart({ points, color, axisFmt }) {
+function MetricChart({ points, color, axisFmt, valueFmt, dateFmt }) {
+  const [active, setActive] = useState(null);
+  const svgRef = useRef(null);
   if (points.length < 2) return null;
   const W = 320, H = 150, padL = 44, padR = 12, padT = 10, padB = 22;
   const vs = points.map((p) => p.v);
@@ -1203,8 +1304,24 @@ function MetricChart({ points, color, axisFmt }) {
   /* con muchos puntos los círculos se solapan y quedan como una mancha — a partir de cierta densidad
      solo marcamos el último (la línea completa se sigue viendo con todo el detalle). */
   const dense = points.length > 24;
+  const fmtV = valueFmt || axisFmt;
+  const fmtD = dateFmt || shortDate;
+  /* scrubbing: al arrastrar dedo/ratón se resalta el punto más cercano y se muestra su fecha y valor */
+  const locate = (clientX) => {
+    const svg = svgRef.current; if (!svg) return;
+    const r = svg.getBoundingClientRect();
+    const sx = ((clientX - r.left) / r.width) * W;
+    let idx = Math.round(((sx - padL) / (W - padL - padR)) * (points.length - 1));
+    idx = Math.max(0, Math.min(points.length - 1, idx));
+    setActive(idx);
+  };
+  const ap = active != null && active < points.length ? points[active] : null;
+  const ax = ap ? x(active) : 0;
+  const tipRight = ap && active > points.length / 2;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+    <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block", touchAction: "none" }}
+      onMouseMove={(e) => locate(e.clientX)} onMouseLeave={() => setActive(null)}
+      onTouchStart={(e) => locate(e.touches[0].clientX)} onTouchMove={(e) => locate(e.touches[0].clientX)} onTouchEnd={() => setActive(null)}>
       {ticks.map((t, i) => (
         <g key={i}>
           <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} stroke={T.line} strokeWidth={1} />
@@ -1219,6 +1336,17 @@ function MetricChart({ points, color, axisFmt }) {
         <text x={x(midIdx)} y={H - 7} textAnchor="middle" fontSize={9} fontWeight={600} fill={T.sub}>{shortDate(points[midIdx].date)}</text>
       )}
       <text x={x(points.length - 1)} y={H - 7} textAnchor="end" fontSize={9} fontWeight={600} fill={T.sub}>{shortDate(points[points.length - 1].date)}</text>
+      {ap && (
+        <g pointerEvents="none">
+          <line x1={ax} x2={ax} y1={padT} y2={H - padB} stroke={color} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
+          <circle cx={ax} cy={y(ap.v)} r={4.5} fill={color} stroke="#fff" strokeWidth={1.6} />
+          <g transform={`translate(${tipRight ? ax - 94 : ax + 6}, ${padT})`}>
+            <rect x={0} y={0} width={88} height={30} rx={6} fill={T.ink} opacity={0.92} />
+            <text x={7} y={12} fontSize={9} fontWeight={600} fill="#fff" opacity={0.75}>{fmtD(ap.date)}</text>
+            <text x={7} y={24} fontSize={11} fontWeight={800} fill="#fff">{fmtV(ap.v)}</text>
+          </g>
+        </g>
+      )}
     </svg>
   );
 }
@@ -1235,7 +1363,7 @@ const METRICS = {
 };
 /* ---------- rangos del gráfico de Rendimiento: filtra qué snapshots se muestran, evita saturación con historial largo ---------- */
 const RANGE_DAYS = { "7D": 7, "1M": 30, "3M": 90, "1A": 365 };
-const RANGE_KEYS = ["7D", "1M", "3M", "1A", "Todo"];
+const RANGE_KEYS = ["7D", "1M", "3M", "1A", "Todo", "Fechas"];
 function rangeCutoffISO(range) {
   if (range === "Todo" || !RANGE_DAYS[range]) return null;
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - RANGE_DAYS[range]);
@@ -1245,6 +1373,9 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
   const [expanded, setExpanded] = useState(null);
   const [metric, setMetric] = useState("NLV");
   const [range, setRange] = useState("1M");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const dateInputStyle = { width: "100%", boxSizing: "border-box", height: 40, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 12, padding: "0 12px", fontSize: 13, fontWeight: 600, color: T.ink, outline: "none", WebkitAppearance: "none", appearance: "none" };
   const sorted = [...snapshots].sort((a, b) => (a.date < b.date ? 1 : -1)); // desc
   const first = sorted[sorted.length - 1];
   const asc = [...snapshots].sort((a, b) => (a.date < b.date ? -1 : 1));
@@ -1274,12 +1405,24 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
   const sp = SPECIAL[metric];
   const m = sp ? null : METRICS[metric];
   const fullSeries = sp ? sp.series : asc.map((s) => ({ date: s.date, v: m.get(s) })).filter((p) => isFinite(p.v));
-  const rangeCutoff = rangeCutoffISO(range);
-  const series = rangeCutoff ? fullSeries.filter((p) => p.date >= rangeCutoff) : fullSeries;
+  const inRange = (d) => {
+    if (range === "Fechas") return (!customFrom || d >= customFrom) && (!customTo || d <= customTo);
+    const cut = rangeCutoffISO(range);
+    return !cut || d >= cut;
+  };
+  let series = fullSeries.filter((p) => inRange(p.date));
+  /* Rent. real: re-basar el índice TWR al inicio del rango visible, para que tanto la cifra como la curva
+     reflejen el periodo seleccionado (antes mostraba siempre el acumulado desde el primer snapshot). */
+  if (metric === "Rent. real" && series.length) {
+    const base = series[0].v || 100;
+    series = series.map((p) => ({ date: p.date, v: (p.v / base) * 100 }));
+  }
   const mFmt = sp ? sp.fmt : m.fmt;
   const mAxis = sp ? sp.axis : m.axis;
   const mColor = sp ? sp.color : m.color;
-  const curV = fullSeries.length ? fullSeries[fullSeries.length - 1].v : NaN;
+  const curV = metric === "Rent. real"
+    ? (series.length ? series[series.length - 1].v : NaN)
+    : (fullSeries.length ? fullSeries[fullSeries.length - 1].v : NaN);
   const firstV = series.length ? series[0].v : NaN;
   const dTotal = curV - firstV;
   const dTotalPct = firstV ? dTotal / Math.abs(firstV) : NaN;
@@ -1304,6 +1447,12 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
           <div style={{ marginBottom: 8 }}>
             <Pill options={RANGE_KEYS} value={range} onChange={setRange} size="sm" />
           </div>
+          {range === "Fechas" && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+              <input type="date" value={customFrom} onChange={(e) => setCustomFrom(e.target.value)} style={dateInputStyle} />
+              <input type="date" value={customTo} onChange={(e) => setCustomTo(e.target.value)} style={dateInputStyle} />
+            </div>
+          )}
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 10 }}>
             <div>
               <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{metric === "Rent. real" ? "Rentabilidad sin aportaciones ni traspasos (TWR)" : metric === "Aportado" ? "Aportaciones netas acumuladas" : metric + " · último snapshot"}</div>
@@ -1320,7 +1469,7 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
           </div>
           {series.length >= 2 ? (
             <div style={{ background: T.tile, borderRadius: 16, padding: "12px 10px 8px" }}>
-              <MetricChart points={series} color={mColor} axisFmt={mAxis} />
+              <MetricChart points={series} color={mColor} axisFmt={mAxis} valueFmt={mFmt} />
             </div>
           ) : fullSeries.length >= 2 ? (
             <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500 }}>Sin snapshots en este rango — prueba "Todo" o un rango mayor.</div>
@@ -1455,7 +1604,7 @@ function AportacionesCard({ flows, setFlows, brokers }) {
       {cumSeries.length >= 2 && (
         <div style={{ background: T.tile, borderRadius: 16, padding: "12px 10px 8px", marginBottom: 14 }}>
           <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6, paddingLeft: 4 }}>Aportaciones netas acumuladas</div>
-          <MetricChart points={cumSeries} color={T.purple} axisFmt={(v) => "$" + kFmt(v)} />
+          <MetricChart points={cumSeries} color={T.purple} axisFmt={(v) => "$" + kFmt(v)} valueFmt={(v) => signMoney(v)} />
         </div>
       )}
 
@@ -2711,6 +2860,7 @@ function NavIcon({ name }) {
       {name === "primas" && (<g {...P}><circle cx="12" cy="12" r="8.5" /><path d="M12 7.2v9.6M14.8 8.8c-.6-.9-1.7-1.4-2.8-1.4-1.6 0-2.9 1-2.9 2.3s1.3 2 2.9 2.3c1.6.3 2.9 1 2.9 2.3s-1.3 2.3-2.9 2.3c-1.1 0-2.2-.5-2.8-1.4" /></g>)}
       {name === "mtm" && (<g {...P}><path d="M3.5 20.5h17" /><path d="M4.5 15.5l4.4-4.8 3.5 3.2 6.6-7.4" /><path d="M19 10.2V6.5h-3.7" /></g>)}
       {name === "estrategias" && (<g {...P}><path d="M12 3.5l8.5 4.4L12 12.3 3.5 7.9 12 3.5z" /><path d="M3.5 12.2l8.5 4.4 8.5-4.4" /><path d="M3.5 16.4l8.5 4.4 8.5-4.4" /></g>)}
+      {name === "rendimiento" && (<g {...P}><path d="M3.5 20.5h17" /><path d="M4.5 16l4.3-5 3.4 3 5.3-6.5" /><path d="M20 5.5V9h-3.5" /></g>)}
     </svg>
   );
 }
@@ -2795,7 +2945,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
    · Estrategias — TODAS las posiciones (abiertas y cerradas) archivadas por tipo: Acciones, Covered
      Calls, Short Puts, PMCC, DC/DD, Otras. Selector Abiertas/Cerradas. Al pulsar una posición se expande
      con: cadena de rolls, prima acumulada, BEP, ROM (prima/riesgo), DTE, DIT e IVR de apertura. ---------- */
-function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEditDiv }) {
+function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEditDiv, snapshots, flows, saveSnapshot, deleteSnapshot }) {
   const [sub, setSub] = useState("primas");
   const [stratCat, setStratCat] = useState("Acciones");
   const [stratStatus, setStratStatus] = useState("Abiertas");
@@ -3036,7 +3186,7 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
   return (
     <>
       <div style={{ display: "flex", gap: 6, background: T.card, borderRadius: 18, padding: 6, marginBottom: 14, boxShadow: T.shadow }}>
-        {[["primas", "Primas"], ["mtm", "MTM"], ["estrategias", "Estrategias"]].map(([id, label]) => (
+        {[["primas", "Primas"], ["mtm", "MTM"], ["rendimiento", "Rendimiento"], ["estrategias", "Estrategias"]].map(([id, label]) => (
           <button key={id} onClick={() => setSub(id)} style={{
             flex: 1, border: "none", cursor: "pointer", borderRadius: 13, padding: "8px 0 7px", fontSize: 12, fontWeight: 700,
             display: "flex", flexDirection: "column", alignItems: "center", gap: 3,
@@ -3048,7 +3198,9 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
         ))}
       </div>
 
-      {sub !== "estrategias" ? (
+      {sub === "rendimiento" ? (
+        <RendimientoCard snapshots={snapshots} flows={flows} onSave={saveSnapshot} onDelete={deleteSnapshot} />
+      ) : sub !== "estrategias" ? (
         <div style={{ background: T.card, borderRadius: 24, padding: 16, boxShadow: T.shadow, marginBottom: 14 }}>
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>{sub === "primas" ? "Primas" : "MTM · resultado realizado"}</div>
@@ -3343,9 +3495,12 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
                usaban DIT y el día de apertura, con DIT=0, el anualizado salía "—"). */
             const annPeriod = p.closed ? dit : dte;
             const romAnn = isFinite(rom) && isFinite(annPeriod) && annPeriod > 0 ? rom * (365 / annPeriod) : NaN;
-            /* ROI de acciones cerradas: P&L realizado / capital invertido (BEP × qty). Anualizado con el DIT real. */
+            /* ROI de acciones: P&L / capital invertido (BEP × qty). Cerradas usan el P&L realizado; abiertas,
+               el unrealised. Anualizado con el DIT real (rentabilidad × 365/DIT), mismo criterio en ambos casos.
+               En abiertas el DIT es apertura→hoy, así que el anualizado extrapola el periodo mantenido hasta ahora. */
             const stockBasis = Math.abs(n(effBep(p)) * n(p.qty));
-            const stockRoi = !isOpt && p.closed && stockBasis ? result / stockBasis : NaN;
+            const stockPnl = !isOpt ? (p.closed ? result : effPnl(p)) : NaN;
+            const stockRoi = !isOpt && stockBasis ? stockPnl / stockBasis : NaN;
             const stockAnnRoi = isFinite(stockRoi) && isFinite(dit) && dit > 0 ? stockRoi * (365 / dit) : NaN;
             const fmtPct2 = (v) => (isFinite(v) ? (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%" : "\u2014");
             const contratos = n(p.qty) / 100;
@@ -3456,10 +3611,10 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
                             <div style={{ fontSize: 22, fontWeight: 800, color: (p.closed ? result : effPnl(p)) >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{signMoney(p.closed ? result : effPnl(p))}</div>
                             <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>{p.closed ? "P&L realizado" : "P&L unrealised"}</div>
                           </div>
-                          {p.closed && (
+                          {isFinite(stockAnnRoi) && (
                             <div style={{ textAlign: "right" }}>
-                              <div style={{ fontSize: 22, fontWeight: 800, color: isFinite(stockAnnRoi) && stockAnnRoi >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{fmtPct2(stockAnnRoi)}</div>
-                              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>Annualized ROI</div>
+                              <div style={{ fontSize: 22, fontWeight: 800, color: stockAnnRoi >= 0 ? T.green : T.red, letterSpacing: -0.4 }}>{fmtPct2(stockAnnRoi)}</div>
+                              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 500 }}>Annualized ROI{p.closed ? "" : " (DIT)"}</div>
                             </div>
                           )}
                         </div>
@@ -3475,8 +3630,8 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
                             </div>
                           )}
                         </div>
-                        <div style={{ display: "grid", gridTemplateColumns: p.closed ? "1fr 1fr" : "1fr", gap: 8 }}>
-                          {p.closed && <Tile label="ROI" value={fmtPct2(stockRoi)} tone={isFinite(stockRoi) ? (stockRoi >= 0 ? "green" : "red") : undefined} />}
+                        <div style={{ display: "grid", gridTemplateColumns: isFinite(stockRoi) ? "1fr 1fr" : "1fr", gap: 8 }}>
+                          {isFinite(stockRoi) && <Tile label={p.closed ? "ROI" : "ROI unrealised"} value={fmtPct2(stockRoi)} tone={stockRoi >= 0 ? "green" : "red"} />}
                           <Tile label="DIT" value={isFinite(dit) ? dit + "d" : "—"} />
                         </div>
                       </>
@@ -4484,12 +4639,52 @@ function App() {
   const [wizNat, setWizNat] = useState(null);
   const [wizStrat, setWizStrat] = useState("");
   const [wizForm, setWizForm] = useState({});
+  const [wizOcrBusy, setWizOcrBusy] = useState(false);
+  const [wizOcrMsg, setWizOcrMsg] = useState("");
+  const wizPhotoRef = useRef(null);
   const openWizard = () => {
     setWizBlock(null); setWizNat(null); setWizStrat(""); setWizStep(1); setWizSub(1);
     setWizForm({ broker: broker === "Todos" ? (brokers[0] || "IBKR") : broker, entryDate: new Date().toISOString().slice(0, 10), covered: "SI", collarRisk: "NO" });
+    setWizOcrBusy(false); setWizOcrMsg("");
     setWizOpen(true);
   };
   const wizF = (k) => (v) => setWizForm((f) => ({ ...f, [k]: v }));
+  /* lee una captura y prueba los modelos de GEMINI_MODELS por si el primero está a 429 (mismo patrón
+     que el lector del Comparador). Devuelve { result, message } sin tocar el estado de UI. */
+  const readLegsFallback = async (file, gkey, onWaiting) => {
+    let lastErr = "";
+    for (let round = 0; round < 2; round++) {
+      let rateLimited = false, waitMs = 0;
+      for (let mi = 0; mi < GEMINI_MODELS.length; mi++) {
+        try { return { result: await extractLegsFromImage(file, gkey, GEMINI_MODELS[mi]), message: "" }; }
+        catch (err) {
+          lastErr = String((err && err.message) || err);
+          if (err && err.status === 429) { rateLimited = true; if (err.retryAfterMs) waitMs = Math.max(waitMs, err.retryAfterMs); continue; }
+          return { result: null, message: "Gemini falló: " + lastErr };
+        }
+      }
+      if (round === 0 && rateLimited && waitMs) { const ms = Math.min(waitMs + 500, 65000); if (onWaiting) onWaiting(ms); await new Promise((r) => setTimeout(r, ms)); continue; }
+      break;
+    }
+    return { result: null, message: "Gemini falló (cupo agotado en todos los modelos): " + lastErr };
+  };
+  const onWizPhoto = async (file) => {
+    if (!file) return;
+    const gkey = (() => { try { return localStorage.getItem(KEY_GEMINI) || ""; } catch (e) { return ""; } })();
+    if (!gkey) { setWizOcrMsg("Añade tu API key de Gemini en Ajustes para leer capturas."); return; }
+    setWizOcrBusy(true); setWizOcrMsg("Leyendo captura con Gemini…");
+    try {
+      const { result, message } = await readLegsFallback(file, gkey, (ms) => setWizOcrMsg("Límite de Gemini alcanzado, esperando " + Math.ceil(ms / 1000) + "s…"));
+      if (!result) { setWizOcrMsg(message || "No pude leer la captura."); return; }
+      const patch = mapLegsToWizForm(result, wizStrat);
+      const keys = Object.keys(patch).filter((k) => patch[k] !== "" && patch[k] != null);
+      if (!keys.length) { setWizOcrMsg("No reconocí datos aplicables a esta estrategia en la captura."); return; }
+      setWizForm((f) => ({ ...f, ...patch }));
+      setWizOcrMsg("✓ " + keys.length + " campos rellenados — revísalos antes de guardar.");
+    } catch (e) {
+      setWizOcrMsg("Error: " + String((e && e.message) || e));
+    } finally { setWizOcrBusy(false); }
+  };
   const wizSave = () => {
     const f = wizForm;
     /* credit spreads (IC/Broken Wings): en el asistente se eligen bajo "Crédito" (cobran prima), pero
@@ -5281,8 +5476,6 @@ function App() {
           <BlockCard blk={blk} positions={blockPositions} nlv={nlv} showPnl={showPnl} togglePnl={togglePnl} brokers={brokers}
             editSet={editSet} toggleEdit={toggleEdit} closeEdits={() => setEditSet(new Set())} setPos={setPos} addPos={addPos} delPos={delPos} rollPos={rollPos} closePos={closePos} reopenPos={reopenPos}
             onOpenSheet={openSheet} pendingAction={pendingAction} clearPending={() => setPendingAction(null)} coveredMap={coveredMap} onEditChain={setEditChainId} onEditLots={setEditLotsId} />
-        ) : activeTab === "rendimiento" ? (
-          <RendimientoCard snapshots={snapshots} flows={flows} onSave={saveSnapshot} onDelete={deleteSnapshot} />
         ) : activeTab === "aportaciones" ? (
           <AportacionesCard flows={flows} setFlows={setFlows} brokers={brokers} />
         ) : (
@@ -5299,7 +5492,7 @@ function App() {
 
         {view === "vencimientos" && <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />}
 
-        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} onEditChain={setEditChainId} onEditLots={setEditLotsId} onEditDiv={setEditDivId} />}
+        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} onEditChain={setEditChainId} onEditLots={setEditLotsId} onEditDiv={setEditDivId} snapshots={snapshots} flows={flows} saveSnapshot={saveSnapshot} deleteSnapshot={deleteSnapshot} />}
 
         {view === "ajustes" && (
           <div style={{ display: "grid", gap: 16 }}>
@@ -5680,6 +5873,15 @@ function App() {
                 <div style={{ display: "flex", gap: 6, alignItems: "center", background: T.tile, borderRadius: 12, padding: "8px 12px" }}>
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub }}>B{wizBlock} · {NATS.find((x) => x.id === wizNat)?.label}{wizStrat ? " · " + wizStrat : ""}</span>
                 </div>
+                {(wizNat === "CRED" || wizNat === "DEF") && wizStrat && (
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <button type="button" disabled={wizOcrBusy} onClick={() => wizPhotoRef.current && wizPhotoRef.current.click()} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.tilePurple, border: "none", borderRadius: 12, padding: "11px 0", fontSize: 13.5, fontWeight: 800, color: T.purple, cursor: wizOcrBusy ? "default" : "pointer", opacity: wizOcrBusy ? 0.6 : 1 }}>
+                      {wizOcrBusy ? "Leyendo captura…" : "📷 Leer captura (Gemini)"}
+                    </button>
+                    <input ref={wizPhotoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => { const file = e.target.files && e.target.files[0]; e.target.value = ""; if (file) onWizPhoto(file); }} />
+                    {wizOcrMsg && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, background: T.card, borderRadius: 10, padding: "8px 10px", lineHeight: 1.4 }}>{wizOcrMsg}</div>}
+                  </div>
+                )}
                 {(wizStrat === "Covered Call" || wizStrat === "Collar") ? (() => {
                   /* covered call y collar: el subyacente se elige de las acciones abiertas de B1 — fija ticker
                      y broker, y deja el enlace (coveredBy) para el banner en B1 y el riesgo 0 del overlay */
