@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.38";
+const APP_VERSION = "5.39";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1306,7 +1306,7 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
           </div>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", marginBottom: 10 }}>
             <div>
-              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{metric === "Rent. real" ? "Rentabilidad sin aportaciones (TWR)" : metric === "Aportado" ? "Aportaciones netas acumuladas" : metric + " · último snapshot"}</div>
+              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4 }}>{metric === "Rent. real" ? "Rentabilidad sin aportaciones ni traspasos (TWR)" : metric === "Aportado" ? "Aportaciones netas acumuladas" : metric + " · último snapshot"}</div>
               <div style={{ fontSize: 24, fontWeight: 800, color: T.ink, letterSpacing: -0.5, marginTop: 1 }}>{isFinite(curV) ? mFmt(curV) : "—"}</div>
             </div>
             {series.length >= 2 && metric !== "Rent. real" && (
@@ -1411,7 +1411,7 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
         );
       })}
 
-      <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, marginTop: 12 }}>Cada "🔄 Precios" guarda un snapshot automático del día; el mismo día se sobrescribe, así que el que queda registrado es siempre el último del día. Cada snapshot recoge NLV, MKT VL, riesgo total, plausible, P&L y el detalle por bloque y subyacente de toda la cartera, sin importar el filtro de broker. "Rent. real" es la rentabilidad encadenada por tramos (TWR) descontando las aportaciones y retiros registrados en 💶 Aportaciones (Dietz modificado, flujo ponderado a mitad de tramo) — es la cifra comparable con un índice. Δ Real = Δ NLV − aportaciones netas del tramo. Toca un snapshot con anterior para ver el desglose.</div>
+      <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, marginTop: 12 }}>Cada "🔄 Precios" guarda un snapshot automático del día; el mismo día se sobrescribe, así que el que queda registrado es siempre el último del día. Cada snapshot recoge NLV, MKT VL, riesgo total, plausible, P&L y el detalle por bloque y subyacente de toda la cartera, sin importar el filtro de broker. "Rent. real" es la rentabilidad encadenada por tramos (TWR) descontando las aportaciones, retiros y traspasos de acciones registrados en 💶 Aportaciones (Dietz modificado, flujo ponderado a mitad de tramo) — es la cifra comparable con un índice. Δ Real = Δ NLV − flujos netos del tramo (efectivo + traspasos). Toca un snapshot con anterior para ver el desglose.</div>
     </div>
   );
 }
@@ -1422,6 +1422,7 @@ function AportacionesCard({ flows, setFlows, brokers }) {
   const [date, setDate] = useState(today);
   const [amount, setAmount] = useState("");
   const [kind, setKind] = useState("Aportación");
+  const [via, setVia] = useState("Efectivo"); // "Efectivo" | "Acciones" (traspaso in-kind, a valor de mercado)
   const [brk, setBrk] = useState(brokers[0] || "");
   const [note, setNote] = useState("");
   useEffect(() => { if (!brokers.includes(brk)) setBrk(brokers[0] || ""); }, [brokers]);
@@ -1429,7 +1430,7 @@ function AportacionesCard({ flows, setFlows, brokers }) {
     const a = Math.abs(n(amount));
     if (!a || !date) return;
     const signed = kind === "Retiro" ? -a : a;
-    setFlows((fs) => [...fs, { id: newId(), date, amount: String(signed), broker: brk, note: note.trim() }]);
+    setFlows((fs) => [...fs, { id: newId(), date, amount: String(signed), broker: brk, note: note.trim(), via }]);
     setAmount(""); setNote("");
   };
   const del = (id) => setFlows((fs) => fs.filter((f) => f.id !== id));
@@ -1462,9 +1463,12 @@ function AportacionesCard({ flows, setFlows, brokers }) {
         <div style={{ marginBottom: 10 }}>
           <Pill options={["Aportación", "Retiro"]} value={kind} onChange={setKind} size="sm" />
         </div>
+        <div style={{ marginBottom: 10 }}>
+          <Pill options={["Efectivo", "Acciones"]} value={via} onChange={setVia} size="sm" />
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)} style={inputStyle} />
-          <input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Importe USD" style={inputStyle} />
+          <input type="number" inputMode="decimal" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder={via === "Acciones" ? "Valor mercado USD" : "Importe USD"} style={inputStyle} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 10 }}>
           <select value={brk} onChange={(e) => setBrk(e.target.value)} style={{ ...inputStyle, appearance: "none", WebkitAppearance: "none" }}>
@@ -1472,15 +1476,15 @@ function AportacionesCard({ flows, setFlows, brokers }) {
           </select>
           <input type="text" value={note} onChange={(e) => setNote(e.target.value)} placeholder="Nota (opcional)" style={inputStyle} />
         </div>
-        <button onClick={add} style={{ width: "100%", background: kind === "Retiro" ? T.red : T.green, border: "none", borderRadius: 14, padding: "12px 0", fontSize: 14.5, fontWeight: 700, color: "#fff", cursor: "pointer" }}>{kind === "Retiro" ? "− Registrar retiro" : "+ Registrar aportación"}</button>
+        <button onClick={add} style={{ width: "100%", background: kind === "Retiro" ? T.red : T.green, border: "none", borderRadius: 14, padding: "12px 0", fontSize: 14.5, fontWeight: 700, color: "#fff", cursor: "pointer" }}>{via === "Acciones" ? (kind === "Retiro" ? "− Traspaso de acciones (salida)" : "+ Traspaso de acciones (entrada)") : (kind === "Retiro" ? "− Registrar retiro" : "+ Registrar aportación")}</button>
       </div>
 
-      {sorted.length === 0 && <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "4px 0" }}>Sin movimientos. Registra cada depósito o retirada de cash con su fecha: el Rendimiento los descuenta para que la rentabilidad no se distorsione.</div>}
+      {sorted.length === 0 && <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500, padding: "4px 0" }}>Sin movimientos. Registra cada aportación o retirada —de efectivo o por traspaso de acciones (a valor de mercado)— con su fecha: el Rendimiento las descuenta para que la rentabilidad no se distorsione.</div>}
       {sorted.map((f) => (
         <div key={f.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: `1px solid ${T.line}`, padding: "9px 0" }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 13.5, fontWeight: 800, color: T.ink }}>{new Date(f.date + "T00:00:00").toLocaleDateString("es-ES", { day: "2-digit", month: "short", year: "numeric" })}</div>
-            <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.broker}{f.note ? " · " + f.note : ""}</div>
+            <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{f.via === "Acciones" ? "🔄 Acciones · " : ""}{f.broker}{f.note ? " · " + f.note : ""}</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0 }}>
             <span style={{ fontSize: 14.5, fontWeight: 800, color: n(f.amount) >= 0 ? T.green : T.red }}>{signMoney(f.amount)}</span>
@@ -1489,7 +1493,7 @@ function AportacionesCard({ flows, setFlows, brokers }) {
         </div>
       ))}
 
-      <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, marginTop: 12 }}>Solo registro para el cálculo de rendimiento: no modifica el cash de la cuenta (ese lo actualizas en la cuenta o con posiciones Cash en B0). Puedes añadir movimientos con fecha pasada; el TWR se recalcula al momento.</div>
+      <div style={{ fontSize: 11, color: T.sub, lineHeight: 1.5, marginTop: 12 }}>Solo registro para el cálculo de rendimiento: no modifica el cash ni las posiciones de la cuenta (eso lo actualizas en la cuenta o con posiciones en B0). Un traspaso de acciones se registra a su valor de mercado en la fecha del traspaso, igual que una aportación de cash, para que el salto de NLV no cuente como rentabilidad. Puedes añadir movimientos con fecha pasada; el TWR se recalcula al momento.</div>
     </div>
   );
 }
