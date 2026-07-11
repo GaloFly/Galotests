@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.49";
+const APP_VERSION = "5.60";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1275,8 +1275,9 @@ function VencimientosCard({ rows, onOpen }) {
         <InfoDot onClick={() => onOpen("vencimientos")} />
       </div>
       {rows.length > 0 && (() => {
-        /* resumen: operaciones abiertas con vencimiento, cuántas están ITM (put: últ<strike; call: últ>strike),
-           riesgo total de vencimientos y riesgo concentrado en las ITM con su % del total entre paréntesis. */
+        /* resumen tipo tarjeta de estadísticas (mismo formato que Estrategias · cerradas): cifra grande
+           de riesgo total arriba, y 4 tiles — operaciones abiertas, ITM (put: últ<strike; call: últ>strike),
+           riesgo total y riesgo ITM con su % del total entre paréntesis. */
         const allDetails = rows.flatMap((r) => r.detailRows || []);
         const isITM = (d) => {
           const lastN = n(d.last), strikeN = n(d.strike);
@@ -1287,18 +1288,29 @@ function VencimientosCard({ rows, onOpen }) {
         const totalRiesgo = allDetails.reduce((s, d) => s + n(d.riesgo), 0);
         const itmRiesgo = itm.reduce((s, d) => s + n(d.riesgo), 0);
         const itmPct = totalRiesgo ? itmRiesgo / totalRiesgo : NaN;
-        const box = (label, value, tone) => (
-          <div style={{ background: tone === "red" ? T.tileRed : T.tile, borderRadius: 12, padding: "9px 10px" }}>
-            <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 3, lineHeight: 1.2 }}>{label}</div>
-            <div style={{ fontSize: 15, fontWeight: 800, color: tone === "red" ? T.red : T.ink, fontVariantNumeric: "tabular-nums" }}>{value}</div>
-          </div>
-        );
         return (
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-            {box("Operaciones abiertas", allDetails.length)}
-            {box("Opciones ITM", itm.length, itm.length ? "red" : undefined)}
-            {box("Riesgo total", "$" + money(totalRiesgo))}
-            {box("Riesgo ITM", "$" + money(itmRiesgo) + (isFinite(itmPct) ? " (" + Math.round(itmPct * 100) + "%)" : ""), itm.length ? "red" : undefined)}
+          <div style={{ background: T.dark, borderRadius: 18, padding: "14px 16px", marginBottom: 14, color: "#fff" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+              <div>
+                <div style={{ fontSize: 12.5, fontWeight: 800 }}>📅 Vencimientos · abiertos</div>
+                <div style={{ fontSize: 10.5, color: "#B9C2CC", fontWeight: 600, marginTop: 2 }}>{allDetails.length} {allDetails.length === 1 ? "operación" : "operaciones"} · {itm.length} ITM</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", letterSpacing: -0.5 }}>${money(totalRiesgo)}</div>
+                <div style={{ fontSize: 10.5, color: "#B9C2CC", fontWeight: 600 }}>Riesgo total</div>
+              </div>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+              {[["Operaciones", String(allDetails.length), "#fff"],
+                ["Opciones ITM", String(itm.length), itm.length ? T.red : "#fff"],
+                ["Riesgo total", "$" + money(totalRiesgo), "#fff"],
+                ["Riesgo ITM" + (isFinite(itmPct) ? " (" + Math.round(itmPct * 100) + "%)" : ""), "$" + money(itmRiesgo), itmRiesgo > 0 ? T.red : "#fff"]].map(([lbl, val, col]) => (
+                <div key={lbl} style={{ background: "rgba(255,255,255,0.08)", borderRadius: 12, padding: "9px 6px", textAlign: "center", minWidth: 0 }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: col, letterSpacing: -0.3, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
+                  <div style={{ fontSize: 9.5, color: "#B9C2CC", marginTop: 2, fontWeight: 600, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{lbl}</div>
+                </div>
+              ))}
+            </div>
           </div>
         );
       })()}
@@ -3075,7 +3087,7 @@ function BlockCard({ blk, positions, nlv, editSet, toggleEdit, closeEdits, setPo
    · Estrategias — TODAS las posiciones (abiertas y cerradas) archivadas por tipo: Acciones, Covered
      Calls, Short Puts, PMCC, DC/DD, Otras. Selector Abiertas/Cerradas. Al pulsar una posición se expande
      con: cadena de rolls, prima acumulada, BEP, ROM (prima/riesgo), DTE, DIT e IVR de apertura. ---------- */
-function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEditDiv, snapshots, flows, saveSnapshot, deleteSnapshot }) {
+function MovimientosView({ positions, nlv, reopenPos, onEditChain, onEditLots, onEditDiv, snapshots, flows, saveSnapshot, deleteSnapshot }) {
   const [sub, setSub] = useState("primas");
   const [stratCat, setStratCat] = useState("Acciones");
   const [stratStatus, setStratStatus] = useState("Abiertas");
@@ -3362,7 +3374,10 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
                   {y === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + y}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 800, color: "#C4CCD4", textAlign: "right", paddingRight: 8 }}>${money2(yearTotals[y].fees)}</span>
-                <span style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 8, paddingRight: 10 }}>{signMoney(yearTotals[y].total)}</span>
+                <div style={{ textAlign: "right", borderLeft: "1.5px solid rgba(255,255,255,0.25)", paddingLeft: 8, paddingRight: 10 }}>
+                  <div style={{ fontSize: 16.5, fontWeight: 800, color: yearTotals[y].total >= 0 ? T.green : T.red, lineHeight: 1.1 }}>{signMoney(yearTotals[y].total)}</div>
+                  {isFinite(nlv) && nlv > 0 && <div style={{ fontSize: 10, fontWeight: 700, color: "#9AA4AE", marginTop: 1 }}>{signPct(yearTotals[y].total / nlv)} NLV</div>}
+                </div>
               </div>
               {!yCollapsed && monthsOfYear(y).map((key) => {
             const isCollapsed = !openMonths.has(key);
@@ -3373,7 +3388,10 @@ function MovimientosView({ positions, reopenPos, onEditChain, onEditLots, onEdit
                   {key === "sin-fecha" ? "TOTAL SIN FECHA" : "TOTAL " + monthLabel(key)}
                 </span>
                 <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, textAlign: "right", paddingRight: 8 }}>${money2(monthGroups[key].fees)}</span>
-                <span style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>{signMoney(monthGroups[key].total)}</span>
+                <div style={{ textAlign: "right", borderLeft: `1.5px solid ${T.line}`, paddingLeft: 8, paddingRight: 10 }}>
+                  <div style={{ fontSize: 15.5, fontWeight: 800, color: monthGroups[key].total >= 0 ? T.green : T.red, lineHeight: 1.1 }}>{signMoney(monthGroups[key].total)}</div>
+                  {isFinite(nlv) && nlv > 0 && <div style={{ fontSize: 10, fontWeight: 700, color: T.sub, marginTop: 1 }}>{signPct(monthGroups[key].total / nlv)} NLV</div>}
+                </div>
               </div>
               {!isCollapsed && monthGroups[key].items.map((e) => {
                 const blk = BLOCKS.find((b) => b.id === e.block);
@@ -4184,6 +4202,8 @@ function App() {
   positionsRef.current = positions;
   const [broker, setBroker] = useState("Todos");
   const [accOpen, setAccOpen] = useState(false); // estado de cuenta plegado por defecto (ahorra espacio)
+  const navBarRef = useRef(null);
+  const [navHover, setNavHover] = useState(null); // índice de pestaña bajo el dedo al deslizar por el menú inferior
   const [activeTab, setActiveTab] = useState(0);
   const [chartScope, setChartScope] = useState("Bloque");
   const [selectedSlice, setSelectedSlice] = useState(null);
@@ -5513,12 +5533,20 @@ function App() {
         <div style={{ background: T.card, borderRadius: 24, padding: 16, marginBottom: 16, boxShadow: T.shadow }}>
           <div onClick={() => setAccOpen((o) => !o)} style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
             <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase" }}>Cuenta · {broker === "Todos" ? "consolidado" : broker}</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span>Cuenta · {broker === "Todos" ? "consolidado" : broker}</span>
+                {!margin && <span style={{ fontSize: 10.5, fontWeight: 800, color: T.gold, background: T.tileAmber, borderRadius: 8, padding: "2px 8px", textTransform: "none", letterSpacing: 0 }}>⚠️ Falta margen</span>}
+              </div>
               {!accOpen && (
-                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 7, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 21, fontWeight: 800, color: nlv > 0 ? T.ink : T.red, letterSpacing: -0.5 }}>{(nlv < 0 ? "-$" : "$") + money(Math.abs(nlv))}</span>
-                  <span style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>NLV</span>
-                  <span style={{ fontSize: 12.5, fontWeight: 800, color: HEX[toneNlv(elNlv)] }}>EL/NLV {pct(elNlv)}</span>
+                <div style={{ marginTop: 8, display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <span style={{ display: "inline-flex", alignItems: "baseline", gap: 7 }}>
+                    <span style={{ fontSize: 21, fontWeight: 800, color: nlv > 0 ? T.ink : T.red, letterSpacing: -0.5 }}>{(nlv < 0 ? "-$" : "$") + money(Math.abs(nlv))}</span>
+                    <span style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>NLV</span>
+                  </span>
+                  <span style={{ display: "inline-flex", flexDirection: "column", justifyContent: "center", alignItems: "flex-start" }}>
+                    <span style={{ fontSize: 11.5, fontWeight: 800, color: HEX[toneNlv(elNlv)], lineHeight: 1.25, padding: "0 2px 2px", borderBottom: `1px solid ${T.line}`, alignSelf: "stretch" }}>EL/NLV {pct(elNlv)}</span>
+                    <span style={{ fontSize: 11.5, fontWeight: 800, color: HEX[toneMrgn(elMrgn)], lineHeight: 1.25, padding: "2px 2px 0" }}>EL/MRGN {pct(elMrgn)}</span>
+                  </span>
                   <span style={{ fontSize: 12.5, fontWeight: 700, color: T.sub }}>· {isFinite(leverage) ? leverage.toFixed(2) + "×" : "—"}</span>
                 </div>
               )}
@@ -5544,6 +5572,7 @@ function App() {
               </>
             )}
           </div>
+          {broker !== "Todos" && <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginBottom: 9, background: T.tile, borderRadius: 10, padding: "8px 10px", lineHeight: 1.45, textAlign: "justify" }}>💡 Introduce el <b>cash negativo</b> si lo hubiera (débito de margen) y el <b>margen</b> tal como lo muestra tu broker (Maintenance Margin en IBKR).</div>}
           {posCash !== 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Cash = manual {(manualCash < 0 ? "-$" : "$") + money(Math.abs(manualCash))} + posiciones Cash B0 {(posCash < 0 ? "-$" : "$") + money(Math.abs(posCash))} → total {(cash < 0 ? "-$" : "$") + money(Math.abs(cash))}. Las posiciones Cash de B0 ya cuentan aquí (no en MKT VL): no las dupliques en el cash manual.</div>}
           {manualCash > 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>El cash manual positivo (${money(manualCash)}) no se suma al NLV: se asume que tu liquidez ya está en el MKT VL como posición (ETF/money market). Solo un cash manual negativo (margen) rebaja el NLV.</div>}
           {broker === "Todos" && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Elige un broker arriba para editar su cash/margin. Toca ⚙ para añadir o quitar brokers.</div>}
@@ -5597,7 +5626,7 @@ function App() {
             <div style={{ fontSize: 13, fontWeight: 700, color: "#B9C2CC", letterSpacing: 0.5, textTransform: "uppercase", display: "flex", alignItems: "center", gap: 5 }}>
               Riesgo total · P&L <InfoDot onClick={() => setInfo("riesgo")} />
             </div>
-            <div style={{ fontSize: 13.5, color: "#DDE3E9", marginTop: 4 }}>{active.length} posiciones · ${money(totalRiesgo)} riesgo total</div>
+            <div style={{ fontSize: 13.5, color: "#DDE3E9", marginTop: 4, whiteSpace: "nowrap" }}>{active.length} {active.length === 1 ? "posición" : "posiciones"} · ${money(totalRiesgo)} riesgo</div>
           </div>
           <div style={{ fontSize: 26, fontWeight: 800, color: totalPnl >= 0 ? T.green : T.red, letterSpacing: -0.5, flexShrink: 0 }}>{signMoney(totalPnl)}</div>
         </div>
@@ -5636,7 +5665,7 @@ function App() {
 
         {view === "vencimientos" && <VencimientosCard rows={vencimientosRows} onOpen={setInfo} />}
 
-        {view === "movimientos" && <MovimientosView positions={filtered} reopenPos={reopenPos} onEditChain={setEditChainId} onEditLots={setEditLotsId} onEditDiv={setEditDivId} snapshots={snapshots} flows={flows} saveSnapshot={saveSnapshot} deleteSnapshot={deleteSnapshot} />}
+        {view === "movimientos" && <MovimientosView positions={filtered} nlv={nlv} reopenPos={reopenPos} onEditChain={setEditChainId} onEditLots={setEditLotsId} onEditDiv={setEditDivId} snapshots={snapshots} flows={flows} saveSnapshot={saveSnapshot} deleteSnapshot={deleteSnapshot} />}
 
         {view === "ajustes" && (
           <div style={{ display: "grid", gap: 16 }}>
@@ -6546,27 +6575,48 @@ function App() {
     {/* NAV INFERIOR — fuera del contenedor de scroll: fijo al viewport, no se mueve con el rebote.
        Oculto mientras el asistente está abierto para no tapar sus últimas opciones. */}
     {view === "bloques" && !wizOpen && (
-      <button onClick={openWizard} aria-label="Nueva posición" style={{ position: "fixed", right: "max(16px, calc(50% - 270px))", bottom: 88, zIndex: 41, width: 52, height: 52, border: "0.5px solid rgba(255,255,255,0.08)", cursor: "pointer", borderRadius: 26, background: "rgba(28,26,32,0.62)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", color: "#fff", fontSize: 26, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
+      <button onClick={openWizard} aria-label="Nueva posición" style={{ position: "fixed", right: "max(16px, calc(50% - 270px))", bottom: 100, zIndex: 41, width: 52, height: 52, border: "0.5px solid rgba(255,255,255,0.08)", cursor: "pointer", borderRadius: 26, background: "rgba(28,26,32,0.62)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", color: "#fff", fontSize: 26, fontWeight: 600, display: "flex", alignItems: "center", justifyContent: "center", lineHeight: 1 }}>+</button>
     )}
-    {!wizOpen && (
-    <div style={{ position: "fixed", left: 12, right: 12, bottom: 14, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
-      <div style={{ display: "flex", width: "100%", maxWidth: 540, background: "rgba(28,26,32,0.62)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", borderRadius: 26, padding: "7px 8px", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", border: "0.5px solid rgba(255,255,255,0.08)", pointerEvents: "auto" }}>
-        {[["bloques", "portfolio", "Portfolio"], ["movimientos", "movimientos", "Movimientos"], ["vencimientos", "vencimientos", "Vencimientos"], ["comparador", "comparador", "Comparador"], ["ajustes", "ajustes", "Ajustes"]].map(([id, icon, label]) => {
-          const act = view === id;
-          return (
-            <button key={id} onClick={() => selectView(id)} style={{
-              flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
-              background: act ? "rgba(255,255,255,0.10)" : "transparent", borderRadius: 19, padding: "7px 0 6px",
-              color: act ? T.purple : "rgba(255,255,255,0.92)",
-            }}>
-              <NavIcon name={icon} />
-              <span style={{ fontSize: 9.5, fontWeight: 600, letterSpacing: 0.1, whiteSpace: "nowrap", color: act ? T.purple : "rgba(255,255,255,0.92)" }}>{label}</span>
-            </button>
-          );
-        })}
+    {!wizOpen && (() => {
+      const NAV = [["bloques", "portfolio", "Portfolio"], ["movimientos", "movimientos", "Movimientos"], ["vencimientos", "vencimientos", "Vencimientos"], ["comparador", "comparador", "Comparador"], ["ajustes", "ajustes", "Ajustes"]];
+      const NAV_BLUE = "#4C9AF5";
+      const activeIdx = Math.max(0, NAV.findIndex(([id]) => id === view));
+      /* deslizar el dedo por la barra: el pill sigue el dedo (navHover) y al soltar selecciona esa pestaña.
+         El índice se calcula por la posición X del dedo dentro de la zona de pestañas (descontando el padding). */
+      const idxFromX = (clientX) => {
+        const el = navBarRef.current; if (!el) return null;
+        const r = el.getBoundingClientRect();
+        const innerLeft = r.left + 8, innerW = r.width - 16;
+        return Math.max(0, Math.min(NAV.length - 1, Math.floor(((clientX - innerLeft) / innerW) * NAV.length)));
+      };
+      const shownIdx = navHover != null ? navHover : activeIdx;
+      return (
+      <div style={{ position: "fixed", left: 12, right: 12, bottom: 24, display: "flex", justifyContent: "center", zIndex: 40, pointerEvents: "none" }}>
+        <div ref={navBarRef}
+          onTouchStart={(e) => setNavHover(idxFromX(e.touches[0].clientX))}
+          onTouchMove={(e) => setNavHover(idxFromX(e.touches[0].clientX))}
+          onTouchEnd={() => { if (navHover != null) selectView(NAV[navHover][0]); setNavHover(null); }}
+          onTouchCancel={() => setNavHover(null)}
+          style={{ position: "relative", display: "flex", width: "100%", maxWidth: 540, background: "rgba(24,24,30,0.68)", backdropFilter: "blur(22px) saturate(160%)", WebkitBackdropFilter: "blur(22px) saturate(160%)", borderRadius: 26, padding: "7px 8px", boxShadow: "0 12px 34px rgba(0,0,0,0.35)", border: "0.5px solid rgba(255,255,255,0.08)", pointerEvents: "auto", touchAction: "none" }}>
+          {/* pill deslizante: se mueve bajo el dedo (o a la pestaña activa) con transición suave */}
+          <div style={{ position: "absolute", top: 6, bottom: 6, left: `calc(8px + ${shownIdx} * (100% - 16px) / ${NAV.length})`, width: `calc((100% - 16px) / ${NAV.length})`, background: navHover != null ? "rgba(76,154,245,0.32)" : "rgba(76,154,245,0.20)", border: `1px solid rgba(76,154,245,${navHover != null ? 0.6 : 0.35})`, borderRadius: 19, transition: "left 0.19s cubic-bezier(0.22,1,0.36,1), background 0.15s", pointerEvents: "none" }} />
+          {NAV.map(([id, icon, label], i) => {
+            const on = shownIdx === i;
+            return (
+              <button key={id} onClick={() => selectView(id)} style={{
+                position: "relative", zIndex: 1, flex: 1, minWidth: 0, display: "flex", flexDirection: "column", alignItems: "center", gap: 3, border: "none", cursor: "pointer",
+                background: "transparent", borderRadius: 19, padding: "7px 0 6px",
+                color: on ? NAV_BLUE : "rgba(255,255,255,0.92)", transition: "color 0.15s",
+              }}>
+                <NavIcon name={icon} />
+                <span style={{ fontSize: 9.5, fontWeight: on ? 800 : 600, letterSpacing: 0.1, whiteSpace: "nowrap", color: on ? NAV_BLUE : "rgba(255,255,255,0.92)" }}>{label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
-    </div>
-    )}
+      );
+    })()}
     </>
   );
 }
