@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.46";
+const APP_VERSION = "5.48";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -759,6 +759,7 @@ function mapLegsToWizForm(result, wizStrat) {
     if (main.expiry) out.expiry = main.expiry;
     if (main.price) out.prima = main.price;
     if (main.fee) out.comision = main.fee;
+    if (main.qty) out.contratos = main.qty;
   }
   return out;
 }
@@ -1421,8 +1422,9 @@ const METRICS = {
 };
 /* ---------- rangos del gráfico de Rendimiento: filtra qué snapshots se muestran, evita saturación con historial largo ---------- */
 const RANGE_DAYS = { "7D": 7, "1M": 30, "3M": 90, "1A": 365 };
-const RANGE_KEYS = ["7D", "1M", "3M", "1A", "Todo", "Fechas"];
+const RANGE_KEYS = ["7D", "1M", "3M", "YTD", "1A", "Todo", "Fechas"];
 function rangeCutoffISO(range) {
+  if (range === "YTD") return new Date().getFullYear() + "-01-01";
   if (range === "Todo" || !RANGE_DAYS[range]) return null;
   const d = new Date(); d.setHours(0, 0, 0, 0); d.setDate(d.getDate() - RANGE_DAYS[range]);
   return d.toISOString().slice(0, 10);
@@ -1431,6 +1433,7 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
   const [expanded, setExpanded] = useState(null);
   const [metric, setMetric] = useState("NLV");
   const [range, setRange] = useState("1M");
+  const [showSnaps, setShowSnaps] = useState(false); // lista cruda de snapshots plegada por defecto
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const dateInputStyle = { width: "100%", boxSizing: "border-box", height: 40, background: T.tile, border: `1.5px solid ${T.line}`, borderRadius: 12, padding: "0 12px", fontSize: 13, fontWeight: 600, color: T.ink, outline: "none", WebkitAppearance: "none", appearance: "none" };
@@ -1537,7 +1540,13 @@ function RendimientoCard({ snapshots, flows, onSave, onDelete }) {
         </div>
       )}
 
-      {sorted.map((s, i) => {
+      {snapshots.length >= 1 && (
+        <button onClick={() => setShowSnaps((v) => !v)} style={{ width: "100%", background: T.tile, border: "none", borderRadius: 12, padding: "10px 0", fontSize: 12.5, fontWeight: 700, color: T.sub, cursor: "pointer", marginBottom: showSnaps ? 6 : 0 }}>
+          {showSnaps ? "▲ Ocultar snapshots" : "▼ Ver snapshots (" + snapshots.length + ")"}
+        </button>
+      )}
+
+      {showSnaps && sorted.map((s, i) => {
         const prev = sorted[i + 1];
         const vsFirst = first && first !== s;
         const dNlv = prev ? s.nlv - prev.nlv : null;
