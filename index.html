@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.61";
+const APP_VERSION = "5.63";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -969,21 +969,23 @@ function MicroStat({ label, value, color }) {
     </div>
   );
 }
-function MoneyField({ label, value, onChange, signed }) {
+function MoneyField({ label, value, onChange, signed, negOnly }) {
   const strVal = value == null ? "" : String(value);
-  const neg = signed && strVal.trim().startsWith("-");
-  const abs = signed ? strVal.replace("-", "") : strVal;
-  const setAbs = (v) => { const clean = stripLead0(v.replace(/[^0-9.,]/g, "")); onChange(neg ? "-" + clean : clean); };
-  const toggleSign = () => onChange((neg ? "" : "-") + abs);
+  const neg = negOnly ? true : (signed && strVal.trim().startsWith("-"));
+  const abs = (signed || negOnly) ? strVal.replace("-", "") : strVal;
+  /* negOnly (v5.63): campo solo-negativo (ej. "Cash negativo") — el signo − es fijo, no se puede
+     alternar, y todo lo tecleado se guarda con signo negativo (vacío = 0, sin signo). */
+  const setAbs = (v) => { const clean = stripLead0(v.replace(/[^0-9.,]/g, "")); onChange(clean === "" ? "" : (neg ? "-" + clean : clean)); };
+  const toggleSign = () => { if (!negOnly) onChange((neg ? "" : "-") + abs); };
   return (
     <div style={{ background: T.tile, borderRadius: 15, padding: "11px 8px", textAlign: "center" }}>
       <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: 3 }}>
-        {signed && (
-          <button type="button" onClick={toggleSign} style={{ width: 20, height: 20, borderRadius: 6, border: "none", background: neg ? T.red : T.line, color: neg ? "#fff" : T.sub, fontSize: 13, fontWeight: 800, cursor: "pointer", lineHeight: "20px", padding: 0 }}>{neg ? "−" : "+"}</button>
+        {(signed || negOnly) && (
+          <button type="button" onClick={toggleSign} style={{ width: 20, height: 20, borderRadius: 6, border: "none", background: neg && abs !== "" ? T.red : T.line, color: neg && abs !== "" ? "#fff" : T.sub, fontSize: 13, fontWeight: 800, cursor: negOnly ? "default" : "pointer", lineHeight: "20px", padding: 0 }}>−</button>
         )}
         <span style={{ fontSize: 16, fontWeight: 800, color: T.sub }}>$</span>
         <input type="text" inputMode="decimal" value={abs} placeholder="0" onChange={(e) => setAbs(e.target.value)}
-          style={{ width: "5.5em", border: "none", background: "transparent", outline: "none", fontSize: 16, fontWeight: 800, color: neg ? T.red : T.ink, letterSpacing: -0.3, textAlign: "left", padding: "0 0 0 2px" }} />
+          style={{ width: "5.5em", border: "none", background: "transparent", outline: "none", fontSize: 16, fontWeight: 800, color: neg && abs !== "" ? T.red : T.ink, letterSpacing: -0.3, textAlign: "left", padding: "0 0 0 2px" }} />
       </div>
       <div style={{ fontSize: 10, color: T.sub, marginTop: 2, fontWeight: 500 }}>{label}</div>
     </div>
@@ -1275,9 +1277,8 @@ function VencimientosCard({ rows, onOpen }) {
         <InfoDot onClick={() => onOpen("vencimientos")} />
       </div>
       {rows.length > 0 && (() => {
-        /* resumen tipo tarjeta de estadísticas (mismo formato que Estrategias · cerradas): cifra grande
-           de riesgo total arriba, y 4 tiles — operaciones abiertas, ITM (put: últ<strike; call: últ>strike),
-           riesgo total y riesgo ITM con su % del total entre paréntesis. */
+        /* resumen estilo Comparador (v5.62): tarjeta clara con la cifra grande arriba a la derecha y
+           tiles suaves redondeados debajo. ITM = put con últ<strike, call con últ>strike. */
         const allDetails = rows.flatMap((r) => r.detailRows || []);
         const isITM = (d) => {
           const lastN = n(d.last), strikeN = n(d.strike);
@@ -1288,26 +1289,26 @@ function VencimientosCard({ rows, onOpen }) {
         const totalRiesgo = allDetails.reduce((s, d) => s + n(d.riesgo), 0);
         const itmRiesgo = itm.reduce((s, d) => s + n(d.riesgo), 0);
         const itmPct = totalRiesgo ? itmRiesgo / totalRiesgo : NaN;
+        const hayItm = itm.length > 0;
         return (
-          <div style={{ background: T.dark, borderRadius: 18, padding: "14px 16px", marginBottom: 14, color: "#fff" }}>
+          <div style={{ marginBottom: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
               <div>
-                <div style={{ fontSize: 12.5, fontWeight: 800 }}>📅 Vencimientos · abiertos</div>
-                <div style={{ fontSize: 10.5, color: "#B9C2CC", fontWeight: 600, marginTop: 2 }}>{allDetails.length} {allDetails.length === 1 ? "operación" : "operaciones"} · {itm.length} ITM</div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: T.ink }}>📅 Abiertas con vencimiento</div>
+                <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginTop: 2 }}>{allDetails.length} {allDetails.length === 1 ? "operación" : "operaciones"}{hayItm ? " · " + itm.length + " ITM" : " · ninguna ITM"}</div>
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 22, fontWeight: 800, color: "#fff", letterSpacing: -0.5 }}>${money(totalRiesgo)}</div>
-                <div style={{ fontSize: 10.5, color: "#B9C2CC", fontWeight: 600 }}>Riesgo total</div>
+                <div style={{ fontSize: 22, fontWeight: 800, color: T.ink, letterSpacing: -0.5, whiteSpace: "nowrap" }}>${money(totalRiesgo)}</div>
+                <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600 }}>Riesgo total</div>
               </div>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-              {[["Operaciones", String(allDetails.length), "#fff"],
-                ["Opciones ITM", String(itm.length), itm.length ? T.red : "#fff"],
-                ["Riesgo total", "$" + money(totalRiesgo), "#fff"],
-                ["Riesgo ITM" + (isFinite(itmPct) ? " (" + Math.round(itmPct * 100) + "%)" : ""), "$" + money(itmRiesgo), itmRiesgo > 0 ? T.red : "#fff"]].map(([lbl, val, col]) => (
-                <div key={lbl} style={{ background: "rgba(255,255,255,0.08)", borderRadius: 12, padding: "9px 6px", textAlign: "center", minWidth: 0 }}>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: col, letterSpacing: -0.3, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
-                  <div style={{ fontSize: 9.5, color: "#B9C2CC", marginTop: 2, fontWeight: 600, lineHeight: 1.2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{lbl}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 9 }}>
+              {[["Operaciones", String(allDetails.length), T.tile, T.ink],
+                ["Opciones ITM", String(itm.length), hayItm ? T.tileRed : T.tile, hayItm ? T.red : T.ink],
+                ["Riesgo ITM" + (isFinite(itmPct) ? " (" + Math.round(itmPct * 100) + "%)" : ""), "$" + money(itmRiesgo), itmRiesgo > 0 ? T.tileRed : T.tile, itmRiesgo > 0 ? T.red : T.ink]].map(([lbl, val, bg, col]) => (
+                <div key={lbl} style={{ background: bg, borderRadius: 16, padding: "13px 8px", textAlign: "center", minWidth: 0 }}>
+                  <div style={{ fontSize: 17, fontWeight: 800, color: col, letterSpacing: -0.3, fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{val}</div>
+                  <div style={{ fontSize: 10, color: T.sub, marginTop: 3, fontWeight: 600, lineHeight: 1.25 }}>{lbl}</div>
                 </div>
               ))}
             </div>
@@ -5570,21 +5571,14 @@ function App() {
               </>
             ) : (
               <>
-                <Tile label={"Cash · " + broker} value={(cash < 0 ? "-$" : "$") + money(Math.abs(cash))} tone={cash < 0 ? "red" : undefined} />
+                <MoneyField label={"Cash negativo · " + broker} value={(accounts[broker] || {}).cash} onChange={setAccField(broker, "cash")} negOnly />
                 <MoneyField label={"Margin · " + broker} value={(accounts[broker] || {}).margin} onChange={setAccField(broker, "margin")} />
               </>
             )}
           </div>
-          {broker !== "Todos" && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
-              <MoneyField label={"Cash manual (ajuste) · " + broker} value={(accounts[broker] || {}).cash} onChange={setAccField(broker, "cash")} signed />
-              <div style={{ fontSize: 10.5, color: T.sub, fontWeight: 600, lineHeight: 1.4, alignSelf: "center", padding: "0 2px" }}>El cash de B0 (${money(posCash)}) ya se suma solo. Usa este campo para cash suelto o negativo (margen).</div>
-            </div>
-          )}
-          {posCash > 0 && manualCash < 0 && <div style={{ fontSize: 11, fontWeight: 700, color: T.red, background: T.tileRed, borderRadius: 10, padding: "8px 10px", marginBottom: 9, lineHeight: 1.45 }}>⚠️ Tienes cash en B0 (${money(posCash)}) y a la vez cash manual negativo (−${money(Math.abs(manualCash))}). Eso no debería pasar: el broker consumiría antes la liquidez. Revisa los datos.</div>}
-          {broker !== "Todos" && <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginBottom: 9, background: T.tile, borderRadius: 10, padding: "8px 10px", lineHeight: 1.45, textAlign: "justify" }}>💡 Introduce el <b>cash negativo</b> si lo hubiera (débito de margen) y el <b>margen</b> tal como lo muestra tu broker (Maintenance Margin en IBKR).</div>}
-          {posCash !== 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Cash = manual {(manualCash < 0 ? "-$" : "$") + money(Math.abs(manualCash))} + posiciones Cash B0 {(posCash < 0 ? "-$" : "$") + money(Math.abs(posCash))} → total {(cash < 0 ? "-$" : "$") + money(Math.abs(cash))}. Las posiciones Cash de B0 ya cuentan en el Cash y en el MKT VL: no las dupliques en el cash manual.</div>}
-          {manualCash > 0 && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>El cash manual positivo (${money(manualCash)}) no se suma al NLV: se asume que tu liquidez ya está en el MKT VL como posición (ETF/money market). Solo un cash manual negativo (margen) rebaja el NLV.</div>}
+          {broker !== "Todos" && <div style={{ fontSize: 11, color: T.sub, fontWeight: 600, marginBottom: 9, background: T.tile, borderRadius: 10, padding: "8px 10px", lineHeight: 1.45, textAlign: "justify" }}>💡 El cash de B0 {posCash > 0 ? "($" + money(posCash) + ") " : ""}se suma solo al Cash y al MKT VL — no lo dupliques aquí. Este campo es solo para <b>cash negativo</b> (débito de margen), que solo debería existir si NO hay cash en B0. El <b>margen</b>, tal como lo muestra tu broker (Maintenance Margin en IBKR).</div>}
+          {posCash > 0 && manualCash < 0 && <div style={{ fontSize: 11, fontWeight: 700, color: T.red, background: T.tileRed, borderRadius: 10, padding: "8px 10px", marginBottom: 9, lineHeight: 1.45 }}>⚠️ Tienes cash en B0 (${money(posCash)}) y a la vez cash negativo (−${money(Math.abs(manualCash))}). Eso no debería pasar: el broker consumiría antes la liquidez. Revisa los datos.</div>}
+          {broker !== "Todos" && manualCash > 0 && <div style={{ fontSize: 11, fontWeight: 700, color: T.gold, background: T.tileAmber, borderRadius: 10, padding: "8px 10px", marginBottom: 9, lineHeight: 1.45 }}>⚠️ Hay un cash manual positivo antiguo (${money(manualCash)}) guardado. Este campo ahora es solo para cash negativo: si esa liquidez existe, llévala como posición Cash en B0; si no, edita el campo (al reescribirlo quedará en negativo o vacío).</div>}
           {broker === "Todos" && <div style={{ fontSize: 11, color: T.sub, marginBottom: 9, padding: "0 2px" }}>Elige un broker arriba para editar su cash/margin. Toca ⚙ para añadir o quitar brokers.</div>}
           <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 9, marginBottom: 14 }}>
             <Tile label="Excess Liq (auto = NLV − Margin)" value={(el < 0 ? "-$" : "$") + money(Math.abs(el))} tone={el > 0 ? "green" : "red"} />
