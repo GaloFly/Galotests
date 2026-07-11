@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.29";
+const APP_VERSION = "5.30";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -157,12 +157,27 @@ function saveKV(key, obj) {
   try { localStorage.setItem(key, s); } catch (e) {}
   idbSet(key, s);
 }
-/* unión por id de dos listas de posiciones (primary manda en ids compartidos). Ninguna posición que exista en
-   cualquiera de las dos se pierde. Se usa al cargar para reconciliar IndexedDB (primary) y localStorage. */
+/* elige la "mejor" versión de una misma posición al reconciliar dos almacenes: una posición CERRADA nunca
+   debe revertir a abierta (si una fuente va por detrás), y ante empate se prefiere la que tiene más historial
+   (rolls, ventas de lote, dividendos, lotes). Esto evita que las estrategias cerradas y sus movimientos
+   desaparezcan cuando IndexedDB y localStorage no están perfectamente sincronizados. */
+function pickPos(a, b) {
+  if (!a) return b; if (!b) return a;
+  if (!!a.closed !== !!b.closed) return a.closed ? a : b;
+  const score = (p) => (p.rollChain ? p.rollChain.length : 0) + (p.soldLots ? p.soldLots.length : 0) + (p.dividends ? p.dividends.length : 0) + (p.lots ? p.lots.length : 0);
+  return score(a) >= score(b) ? a : b;
+}
+/* unión por id de dos listas de posiciones. Ninguna posición que exista en cualquiera de las dos se pierde, y
+   para las compartidas se conserva la versión más completa (ver pickPos). primary se pasa como preferido en empates. */
 function mergePositionsById(primary, secondary) {
   const a = Array.isArray(primary) ? primary : null;
   const b = Array.isArray(secondary) ? secondary : null;
-  if (a && b) { const m = new Map(); b.forEach((x) => { if (x && x.id) m.set(x.id, x); }); a.forEach((x) => { if (x && x.id) m.set(x.id, x); }); return [...m.values()]; }
+  if (a && b) {
+    const m = new Map();
+    b.forEach((x) => { if (x && x.id) m.set(x.id, x); });
+    a.forEach((x) => { if (x && x.id) m.set(x.id, m.has(x.id) ? pickPos(x, m.get(x.id)) : x); });
+    return [...m.values()];
+  }
   return a || b || null;
 }
 
@@ -4000,11 +4015,27 @@ function App() {
         if (bks.length > 3) bks = bks.slice(0, 3);
         if (stored !== APP_VERSION) {
           const data = {};
-          for (const k of BACKUP_KEYS) { const v = await readRaw(k); if (v != null) data[k] = v; }
+          for (const k of BACKUP_KEYS) {
+            if (k === KEY_POS) {
+              /* la copia de seguridad guarda la UNIÓN de IndexedDB + localStorage: así nunca nace con menos
+                 posiciones que las que realmente hay, y restaurarla jamás recorta datos. */
+              let iv = null, lv = null;
+              try { iv = await idbGet(KEY_POS); } catch (e) {}
+              try { lv = localStorage.getItem(KEY_POS); } catch (e) {}
+              let ip = null, lp = null;
+              try { if (iv != null) { const a = JSON.parse(iv); if (Array.isArray(a)) ip = a; } } catch (e) {}
+              try { if (lv != null) { const a = JSON.parse(lv); if (Array.isArray(a)) lp = a; } } catch (e) {}
+              const merged = mergePositionsById(ip, lp);
+              if (merged) data[k] = JSON.stringify(merged);
+            } else {
+              const v = await readRaw(k); if (v != null) data[k] = v;
+            }
+          }
           const hasData = Object.keys(data).length > 0;
           if (stored != null || hasData) {
             bks = [{ version: stored || "pre-1.0", ts: Date.now(), data }, ...bks].slice(0, 3);
-            setUpdateNotice({ from: stored ? "v" + stored : "versión anterior", to: APP_VERSION });
+            const posCount = (() => { try { return JSON.parse(data[KEY_POS] || "[]").length; } catch (e) { return 0; } })();
+            setUpdateNotice({ from: stored ? "v" + stored : "versión anterior", to: APP_VERSION, count: posCount });
           }
           try { localStorage.setItem(KEY_APPVER, APP_VERSION); } catch (e) {}
         }
@@ -5052,7 +5083,7 @@ function App() {
 
         {updateNotice && (
           <div style={{ background: T.tileGreen, borderRadius: 14, padding: "10px 12px", marginBottom: 12 }}>
-            <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700, lineHeight: 1.45 }}>App actualizada a v{updateNotice.to} (antes {updateNotice.from}). Se guardó una copia automática de tus datos por seguridad.</div>
+            <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 700, lineHeight: 1.45 }}>App actualizada a v{updateNotice.to} (antes {updateNotice.from}). Se guardó una copia automática de tus datos por seguridad{updateNotice.count != null ? " (" + updateNotice.count + " posiciones)" : ""}.</div>
             <div style={{ fontSize: 11.5, color: T.sub, fontWeight: 500, lineHeight: 1.45, marginTop: 3 }}>Si tras la actualización algo no cuadra o faltan datos, restaura la copia desde Backup → Copias automáticas.</div>
             <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
               <button onClick={() => { setUpdateNotice(null); openBackup(); }} style={{ background: T.dark, border: "none", borderRadius: 10, padding: "7px 12px", fontSize: 12, fontWeight: 700, color: "#fff", cursor: "pointer" }}>Ver copias</button>
