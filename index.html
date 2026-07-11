@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.33";
+const APP_VERSION = "5.34";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -4240,10 +4240,35 @@ function App() {
     } catch (e) { setRestoreMsg("err"); }
   };
 
-  const restoreManualBackup = (bk) => {
+  const restoreManualBackup = async (bk) => {
     if (confirmManualBk !== bk.ts) { setConfirmManualBk(bk.ts); setTimeout(() => setConfirmManualBk(null), 4000); return; }
     setConfirmManualBk(null);
-    applyBackup(bk.json); // restaura a estado (que se persiste en IDB + localStorage); cierra el modal al terminar
+    /* v5.34: restaura ESCRIBIENDO en localStorage + IndexedDB (esperando el flush de la cola) y RECARGA, igual
+       que la copia automática. Antes solo hacía applyBackup (estado en memoria) y confiaba en los efectos de
+       guardado; si luego se actualizaba (que recarga), los almacenes podían no tener aún los datos completos y
+       la app releía la versión vieja recortada. Ahora la restauración es durable y sobrevive a la actualización. */
+    try {
+      const d = JSON.parse(bk.json);
+      const writes = [
+        [KEY_POS, Array.isArray(d.positions) ? JSON.stringify(d.positions) : null],
+        [KEY_ACC, d.accounts ? JSON.stringify(d.accounts) : null],
+        [KEY_SNAP, Array.isArray(d.snapshots) ? JSON.stringify(d.snapshots) : null],
+        [KEY_FLOWS, Array.isArray(d.aportaciones) ? JSON.stringify(d.aportaciones) : null],
+        [KEY_TRADES, Array.isArray(d.trades) ? JSON.stringify(d.trades) : null],
+        [KEY_BROKERS, Array.isArray(d.brokers) && d.brokers.length ? JSON.stringify(d.brokers) : null],
+        [KEY_BASIS, typeof d.compBasis === "string" ? d.compBasis : null],
+        [KEY_FINNHUB, typeof d.finnhubKey === "string" && d.finnhubKey ? d.finnhubKey : null],
+        [KEY_GEMINI, typeof d.geminiKey === "string" && d.geminiKey ? d.geminiKey : null],
+        ["bloques_show_pnl", typeof d.showPnl === "boolean" ? (d.showPnl ? "1" : "0") : null],
+      ];
+      for (const [k, v] of writes) {
+        if (v == null) continue;
+        try { localStorage.setItem(k, v); } catch (e) {}
+        await idbSet(k, v);
+      }
+      try { localStorage.setItem(KEY_APPVER, APP_VERSION); } catch (e) {}
+      location.reload();
+    } catch (e) { setRestoreMsg("err"); applyBackup(bk.json); }
   };
 
   const runRefresh = async (key) => {
