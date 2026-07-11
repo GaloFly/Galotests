@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.44";
+const APP_VERSION = "5.45";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -647,10 +647,11 @@ async function extractLegsFromImage(file, apiKey, model) {
     legs: { type: "array", items: { type: "object", properties: {
       right: { type: "string", description: "'C' si es Call, 'P' si es Put" },
       strike: { type: "number" },
-      expiry: { type: "string", description: "vencimiento en formato YYYY-MM-DD" },
+      expiry: { type: "string", description: "vencimiento de la opción tal como aparece, ej. 'JUL 17 2026' o '2026-07-17'" },
       action: { type: "string", description: "'Sold' si es venta/short, 'Bought' si es compra/long" },
       qty: { type: "number" },
-      price: { type: "number", description: "precio POR ACCIÓN de la opción (ej. 2.35), no el total en dólares (ej. 235)" }
+      price: { type: "number", description: "precio POR ACCIÓN de la opción (ej. 2.35), no el total en dólares (ej. 235)" },
+      fee: { type: "number", description: "comisión/fee de esta pata si aparece — suele ser un número pequeño en gris junto al precio (ej. 0.70). Omítelo si no lo ves." }
     } } }
   } };
   const prompt = [
@@ -658,10 +659,11 @@ async function extractLegsFromImage(file, apiKey, model) {
     "Extrae el ticker del subyacente y CADA pata que aparezca. Para cada pata:",
     "- right: 'C' para Call, 'P' para Put.",
     "- strike: precio de ejercicio (ej. 750).",
-    "- expiry: vencimiento en formato YYYY-MM-DD. Interpreta \"JUL 17 '26\" = 2026-07-17.",
+    "- expiry: el VENCIMIENTO de la opción, que casi siempre aparece justo bajo el ticker (ej. \"JUL 17 '26\", \"20 JUL 2026\"). Devuélvelo en formato YYYY-MM-DD si puedes (\"JUL 17 '26\" = 2026-07-17); si no, devuélvelo tal cual lo lees. NO lo dejes vacío si la fecha aparece en la captura.",
     "- action: 'Sold' si la pata es venta (Sold/Sell/Short), 'Bought' si es compra (Bought/Buy/Long).",
     "- qty: número de contratos (ej. 1).",
     "- price: precio POR ACCIÓN de la opción, ej. 2.35. Si además aparece un total como '$235' (precio × 100), NO uses ese; usa el precio por acción (2.35).",
+    "- fee: comisión de la pata si aparece (número pequeño en gris junto al precio, ej. 0.70). Si no lo ves, omítelo.",
     "Devuelve TODAS las patas reconocibles dentro del array 'legs'. Omite cualquier campo que no veas con claridad. Devuelve ÚNICAMENTE el JSON, sin texto adicional."
   ].join("\n");
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + (model || GEMINI_MODEL) + ":generateContent?key=" + encodeURIComponent(apiKey);
@@ -688,6 +690,26 @@ async function extractLegsFromImage(file, apiKey, model) {
   const txt = (parts || []).map((p) => p.text || "").join("");
   try { return JSON.parse(txt); } catch (_) { throw new Error("respuesta no-JSON del modelo"); }
 }
+/* normaliza una fecha leída (YYYY-MM-DD, "JUL 17 '26", "20 JUL 2026", "07/17/2026"…) a YYYY-MM-DD.
+   Los LLM devuelven el vencimiento en formatos variados; aquí lo dejamos siempre en ISO para el input date. */
+const MONTHS_NORM = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12, ene: 1, abr: 4, ago: 8, dic: 12 };
+function normDate(s) {
+  if (!s && s !== 0) return "";
+  const str = String(s).trim();
+  if (!str) return "";
+  let m = str.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
+  if (m) return `${m[1]}-${String(+m[2]).padStart(2, "0")}-${String(+m[3]).padStart(2, "0")}`;
+  m = str.match(/([A-Za-z]{3,})\.?\s+(\d{1,2})\D+(\d{2,4})/) || str.match(/(\d{1,2})\s+([A-Za-z]{3,})\.?\s+(\d{2,4})/);
+  if (m) {
+    let mon, day, yr;
+    if (/[A-Za-z]/.test(m[1])) { mon = MONTHS_NORM[m[1].slice(0, 3).toLowerCase()]; day = +m[2]; yr = +m[3]; }
+    else { day = +m[1]; mon = MONTHS_NORM[m[2].slice(0, 3).toLowerCase()]; yr = +m[3]; }
+    if (mon && day) { if (yr < 100) yr += 2000; return `${yr}-${String(mon).padStart(2, "0")}-${String(day).padStart(2, "0")}`; }
+  }
+  const d = new Date(str);
+  if (!isNaN(d.getTime())) return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return "";
+}
 /* mapea las patas leídas a los campos del asistente según la estrategia elegida.
    DC/DD: cada pata a su lado (put/call) y dirección (Sold=short, Bought=long), con vto corto y largo.
    Credit spreads: solo el ticker (los spreads se rellenan a mano). Resto: primera pata como principal. */
@@ -699,18 +721,19 @@ function mapLegsToWizForm(result, wizStrat) {
   const legs = raw.map((l) => ({
     right: (l && (l.right === "P" || /^p/i.test(l.right || ""))) ? "P" : (l && (l.right === "C" || /^c/i.test(l.right || ""))) ? "C" : "",
     strike: n(l && l.strike) > 0 ? String(n(l.strike)) : "",
-    expiry: (l && typeof l.expiry === "string" && /^\d{4}-\d{2}-\d{2}$/.test(l.expiry)) ? l.expiry : "",
+    expiry: normDate(l && l.expiry),
     sold: /sold|sell|short/i.test((l && l.action) || ""),
     qty: n(l && l.qty) > 0 ? String(Math.round(n(l.qty))) : "",
     price: n(l && l.price) > 0 ? String(Math.round(n(l.price) * 1000) / 1000) : "",
+    fee: n(l && l.fee) > 0 ? String(Math.round(n(l.fee) * 1000) / 1000) : "",
   })).filter((l) => l.right);
   if (DCDD_STRATS.has(wizStrat)) {
     const pick = (right, sold) => legs.find((l) => l.right === right && l.sold === sold);
     const sp = pick("P", true), lp = pick("P", false), sc = pick("C", true), lc = pick("C", false);
-    if (sp) { if (sp.strike) out.spK = sp.strike; if (sp.price) out.spP = sp.price; }
-    if (lp) { if (lp.strike) out.lpK = lp.strike; if (lp.price) out.lpP = lp.price; }
-    if (sc) { if (sc.strike) out.scK = sc.strike; if (sc.price) out.scP = sc.price; }
-    if (lc) { if (lc.strike) out.lcK = lc.strike; if (lc.price) out.lcP = lc.price; }
+    if (sp) { if (sp.strike) out.spK = sp.strike; if (sp.price) out.spP = sp.price; if (sp.fee) out.spF = sp.fee; }
+    if (lp) { if (lp.strike) out.lpK = lp.strike; if (lp.price) out.lpP = lp.price; if (lp.fee) out.lpF = lp.fee; }
+    if (sc) { if (sc.strike) out.scK = sc.strike; if (sc.price) out.scP = sc.price; if (sc.fee) out.scF = sc.fee; }
+    if (lc) { if (lc.strike) out.lcK = lc.strike; if (lc.price) out.lcP = lc.price; if (lc.fee) out.lcF = lc.fee; }
     const putK = (sp && sp.strike) || (lp && lp.strike) || "";
     const callK = (sc && sc.strike) || (lc && lc.strike) || "";
     if (putK) out.dcPutStrike = putK;
@@ -730,6 +753,7 @@ function mapLegsToWizForm(result, wizStrat) {
     if (main.strike) out.strike = main.strike;
     if (main.expiry) out.expiry = main.expiry;
     if (main.price) out.prima = main.price;
+    if (main.fee) out.comision = main.fee;
   }
   return out;
 }
