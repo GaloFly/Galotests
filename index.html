@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.48";
+const APP_VERSION = "5.49";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -1274,6 +1274,34 @@ function VencimientosCard({ rows, onOpen }) {
         <div style={{ fontSize: 15, fontWeight: 800, color: T.ink }}>Vencimientos</div>
         <InfoDot onClick={() => onOpen("vencimientos")} />
       </div>
+      {rows.length > 0 && (() => {
+        /* resumen: operaciones abiertas con vencimiento, cuántas están ITM (put: últ<strike; call: últ>strike),
+           riesgo total de vencimientos y riesgo concentrado en las ITM con su % del total entre paréntesis. */
+        const allDetails = rows.flatMap((r) => r.detailRows || []);
+        const isITM = (d) => {
+          const lastN = n(d.last), strikeN = n(d.strike);
+          const hasLast = d.last !== "" && d.last != null && isFinite(lastN) && lastN !== 0 && strikeN !== 0;
+          return hasLast && (d.right === "C" ? lastN > strikeN : lastN < strikeN);
+        };
+        const itm = allDetails.filter(isITM);
+        const totalRiesgo = allDetails.reduce((s, d) => s + n(d.riesgo), 0);
+        const itmRiesgo = itm.reduce((s, d) => s + n(d.riesgo), 0);
+        const itmPct = totalRiesgo ? itmRiesgo / totalRiesgo : NaN;
+        const box = (label, value, tone) => (
+          <div style={{ background: tone === "red" ? T.tileRed : T.tile, borderRadius: 12, padding: "9px 10px" }}>
+            <div style={{ fontSize: 9.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.3, marginBottom: 3, lineHeight: 1.2 }}>{label}</div>
+            <div style={{ fontSize: 15, fontWeight: 800, color: tone === "red" ? T.red : T.ink, fontVariantNumeric: "tabular-nums" }}>{value}</div>
+          </div>
+        );
+        return (
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+            {box("Operaciones abiertas", allDetails.length)}
+            {box("Opciones ITM", itm.length, itm.length ? "red" : undefined)}
+            {box("Riesgo total", "$" + money(totalRiesgo))}
+            {box("Riesgo ITM", "$" + money(itmRiesgo) + (isFinite(itmPct) ? " (" + Math.round(itmPct * 100) + "%)" : ""), itm.length ? "red" : undefined)}
+          </div>
+        );
+      })()}
       {rows.length === 0 ? (
         <div style={{ fontSize: 12.5, color: T.sub, fontWeight: 500 }}>Sin opciones con vencimiento.</div>
       ) : (
@@ -4155,6 +4183,7 @@ function App() {
   const positionsRef = useRef(positions);
   positionsRef.current = positions;
   const [broker, setBroker] = useState("Todos");
+  const [accOpen, setAccOpen] = useState(false); // estado de cuenta plegado por defecto (ahorra espacio)
   const [activeTab, setActiveTab] = useState(0);
   const [chartScope, setChartScope] = useState("Bloque");
   const [selectedSlice, setSelectedSlice] = useState(null);
@@ -4604,7 +4633,7 @@ function App() {
     const el = rootRef.current;
     if (!el) return;
     const onTouchStart = (e) => {
-      if (view !== "bloques" || refreshing) { pullTrackingRef.current = false; return; }
+      if ((view !== "bloques" && view !== "vencimientos") || refreshing) { pullTrackingRef.current = false; return; }
       const scrollTop = el.scrollTop || 0;
       if (scrollTop <= 0 && e.touches && e.touches.length === 1) {
         pullTrackingRef.current = true;
@@ -5434,7 +5463,7 @@ function App() {
           </div>
         </div>
       )}
-      {view === "bloques" && pullDist > 0 && !refreshing && (
+      {(view === "bloques" || view === "vencimientos") && pullDist > 0 && !refreshing && (
         <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: pullDist, overflow: "hidden", marginBottom: 4 }}>
           <span style={{ fontSize: 20, display: "inline-block", animation: pullDist >= PULL_THRESHOLD ? "pullSpin 0.8s linear infinite" : "none", opacity: Math.min(pullDist / PULL_THRESHOLD, 1) }}>🔄</span>
           <span style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, marginLeft: 8 }}>{pullDist >= PULL_THRESHOLD ? "Suelta para actualizar" : "Tira para actualizar precios"}</span>
@@ -5482,13 +5511,25 @@ function App() {
         {/* CUENTA — oculto en Vencimientos: esa pestaña prioriza la lista de expiraciones, no el estado de cuenta */}
         {view !== "movimientos" && view !== "ajustes" && view !== "vencimientos" && (
         <div style={{ background: T.card, borderRadius: 24, padding: 16, marginBottom: 16, boxShadow: T.shadow }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase", marginBottom: 12 }}>
-            Cuenta · {broker === "Todos" ? "consolidado" : broker}
+          <div onClick={() => setAccOpen((o) => !o)} style={{ cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: T.sub, letterSpacing: 0.5, textTransform: "uppercase" }}>Cuenta · {broker === "Todos" ? "consolidado" : broker}</div>
+              {!accOpen && (
+                <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginTop: 7, flexWrap: "wrap" }}>
+                  <span style={{ fontSize: 21, fontWeight: 800, color: nlv > 0 ? T.ink : T.red, letterSpacing: -0.5 }}>{(nlv < 0 ? "-$" : "$") + money(Math.abs(nlv))}</span>
+                  <span style={{ fontSize: 10.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", letterSpacing: 0.4 }}>NLV</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 800, color: HEX[toneNlv(elNlv)] }}>EL/NLV {pct(elNlv)}</span>
+                  <span style={{ fontSize: 12.5, fontWeight: 700, color: T.sub }}>· {isFinite(leverage) ? leverage.toFixed(2) + "×" : "—"}</span>
+                </div>
+              )}
+            </div>
+            <span style={{ fontSize: 12, fontWeight: 800, color: T.sub, flexShrink: 0 }}>{accOpen ? "▲" : "▼"}</span>
           </div>
+          {accOpen && (<div style={{ marginTop: 12 }}>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
-            <Tile label="MKT VL (suma bloques)" value={(mktvl < 0 ? "-$" : "$") + money(Math.abs(mktvl))} />
-            <Tile label="NLV (MKTV + cash negativo)" value={(nlv < 0 ? "-$" : "$") + money(Math.abs(nlv))} tone={nlv > 0 ? "green" : "red"} />
+            <Tile label="MKT VL" value={(mktvl < 0 ? "-$" : "$") + money(Math.abs(mktvl))} />
+            <Tile label="NLV" value={(nlv < 0 ? "-$" : "$") + money(Math.abs(nlv))} tone={nlv > 0 ? "green" : "red"} />
           </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 9, marginBottom: 9 }}>
             {broker === "Todos" ? (
@@ -5540,6 +5581,7 @@ function App() {
               </span>
             ))}
           </div>
+          </div>)}
         </div>
         )}
 
