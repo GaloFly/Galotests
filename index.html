@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.42";
+const APP_VERSION = "5.44";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -461,7 +461,10 @@ const isAutoMkt = (p) => natOf(p) === "ACC" && p.mktModo !== "MANUAL" && p.last 
 const effMkt = (p) => (isAutoMkt(p) ? n(p.last) * n(p.qty) : n(p.mktValue));
 const isPctMargin = (p) => p.margenModo !== "VALOR";
 const effMargen = (p) => (natOf(p) === "CASH" ? 0 : (isPctMargin(p) ? Math.abs(effMkt(p)) * (p.margenPct === "" || p.margenPct == null ? 0 : n(p.margenPct)) / 100 : n(p.margen)));
-const isAutoPnl = (p) => p.pnlModo !== "MANUAL";
+/* P&L auto: (Último − BEP) × Cantidad para acciones, o simulación a vencimiento para opciones cortas.
+   Las estrategias de riesgo definido (DEF · B3: DC/DD, credit spreads, débito genérico, Long Call) NUNCA
+   son auto: el BEP no es una referencia de precio válida para ellas, así que su P&L es manual (o 0). */
+const isAutoPnl = (p) => p.pnlModo !== "MANUAL" && natOf(p) !== "DEF";
 const effPnl = (p) => {
   if (!isAutoPnl(p)) return n(p.pnl);
   /* opción corta (CRED): P&L no realizado simulado a vencimiento sobre el spot.
@@ -664,7 +667,7 @@ async function extractLegsFromImage(file, apiKey, model) {
   const url = "https://generativelanguage.googleapis.com/v1beta/models/" + (model || GEMINI_MODEL) + ":generateContent?key=" + encodeURIComponent(apiKey);
   const body = { contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mime, data: b64 } }] }],
     generationConfig: { temperature: 0, responseMimeType: "application/json", responseSchema: schema } };
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey }, body: JSON.stringify(body) });
   if (!r.ok) {
     let detail = "HTTP " + r.status; let retryAfterMs = null;
     try {
@@ -676,7 +679,7 @@ async function extractLegsFromImage(file, apiKey, model) {
       }
     } catch (_) {}
     if (retryAfterMs == null) { const m = detail.match(/retry in ([\d.]+)\s*s/i); if (m) retryAfterMs = Math.ceil(parseFloat(m[1]) * 1000); }
-    if (r.status === 400 || r.status === 403) detail = "key inválida o sin permiso (" + detail + ")";
+    if (r.status === 400 || r.status === 401 || r.status === 403) detail = "key inválida o sin permiso — revísala en Ajustes (" + detail + ")";
     if (r.status === 429) detail = "límite diario/por minuto agotado (" + detail + ")";
     const err = new Error(detail); err.status = r.status; if (retryAfterMs != null) err.retryAfterMs = retryAfterMs; throw err;
   }
@@ -2661,8 +2664,8 @@ function PositionRow({ p, editing, onToggle, onDone, onChange, onDelete, onRoll,
           {!cash && showAdv && (
           <label style={{ gridColumn: "span 2" }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
-              <span style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>P&L{isAutoPnl(p) ? "" : " · para posiciones sin precio autodescargable"}</span>
-              <Pill options={["Auto", "Manual"]} value={isAutoPnl(p) ? "Auto" : "Manual"} onChange={(v) => onChange("pnlModo")(v === "Auto" ? "AUTO" : "MANUAL")} size="sm" />
+              <span style={{ fontSize: 10, color: T.sub, fontWeight: 600, textTransform: "uppercase", letterSpacing: 0.4 }}>P&L{isAutoPnl(p) ? "" : (natOf(p) === "DEF" ? " · manual (riesgo definido)" : " · para posiciones sin precio autodescargable")}</span>
+              {natOf(p) !== "DEF" && <Pill options={["Auto", "Manual"]} value={isAutoPnl(p) ? "Auto" : "Manual"} onChange={(v) => onChange("pnlModo")(v === "Auto" ? "AUTO" : "MANUAL")} size="sm" />}
             </div>
             {isAutoPnl(p) ? (
               <div style={{ background: T.tile, borderRadius: 11, border: `1.5px solid ${T.line}`, padding: "9px 10px", fontSize: 14.5, fontWeight: 700, color: T.ink }}>
@@ -4670,9 +4673,9 @@ function App() {
   };
   const onWizPhoto = async (file) => {
     if (!file) return;
-    const gkey = (() => { try { return localStorage.getItem(KEY_GEMINI) || ""; } catch (e) { return ""; } })();
+    const gkey = (geminiKey || (() => { try { return localStorage.getItem(KEY_GEMINI) || ""; } catch (e) { return ""; } })() || "").trim();
     if (!gkey) { setWizOcrMsg("Añade tu API key de Gemini en Ajustes para leer capturas."); return; }
-    setWizOcrBusy(true); setWizOcrMsg("Leyendo captura con Gemini…");
+    setWizOcrBusy(true); setWizOcrMsg("Leyendo captura…");
     try {
       const { result, message } = await readLegsFallback(file, gkey, (ms) => setWizOcrMsg("Límite de Gemini alcanzado, esperando " + Math.ceil(ms / 1000) + "s…"));
       if (!result) { setWizOcrMsg(message || "No pude leer la captura."); return; }
@@ -5876,7 +5879,7 @@ function App() {
                 {(wizNat === "CRED" || wizNat === "DEF") && wizStrat && (
                   <div style={{ display: "grid", gap: 6 }}>
                     <button type="button" disabled={wizOcrBusy} onClick={() => wizPhotoRef.current && wizPhotoRef.current.click()} style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: T.tilePurple, border: "none", borderRadius: 12, padding: "11px 0", fontSize: 13.5, fontWeight: 800, color: T.purple, cursor: wizOcrBusy ? "default" : "pointer", opacity: wizOcrBusy ? 0.6 : 1 }}>
-                      {wizOcrBusy ? "Leyendo captura…" : "📷 Leer captura (Gemini)"}
+                      {wizOcrBusy ? "Leyendo captura…" : "📷 Leer captura"}
                     </button>
                     <input ref={wizPhotoRef} type="file" accept="image/*" style={{ display: "none" }} onChange={(e) => { const file = e.target.files && e.target.files[0]; e.target.value = ""; if (file) onWizPhoto(file); }} />
                     {wizOcrMsg && <div style={{ fontSize: 11.5, fontWeight: 600, color: T.sub, background: T.card, borderRadius: 10, padding: "8px 10px", lineHeight: 1.4 }}>{wizOcrMsg}</div>}
