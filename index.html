@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.30";
+const APP_VERSION = "5.31";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -143,14 +143,31 @@ function idbOpen() {
     } catch (e) { rej(e); }
   });
 }
-async function idbSet(key, val) {
-  try { const db = await idbOpen(); await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(val, key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
+/* v5.31: las escrituras a IndexedDB van por una COLA SERIE con coalescencia. Antes idbSet abría la base en
+   cada llamada y dos guardados seguidos podían COMPLETARSE EN DESORDEN, dejando IndexedDB con el valor viejo
+   (más pequeño) — y como al cargar IDB manda, se cargaban datos recortados y la copia automática nacía corta.
+   Ahora cada clave guarda su "último valor" y las escrituras se encadenan: el estado final de IDB es siempre
+   el último valor escrito, en orden, sin carreras. */
+let __idbChain = Promise.resolve();
+const __idbLatest = Object.create(null);
+function idbSet(key, val) {
+  __idbLatest[key] = val;
+  __idbChain = __idbChain.then(async () => {
+    const v = __idbLatest[key];
+    if (v === undefined) return;
+    try { const db = await idbOpen(); await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(v, key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
+  });
+  return __idbChain;
+}
+function idbDel(key) {
+  __idbLatest[key] = undefined;
+  __idbChain = __idbChain.then(async () => {
+    try { const db = await idbOpen(); await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
+  });
+  return __idbChain;
 }
 async function idbGet(key) {
   try { const db = await idbOpen(); return await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readonly"); const rq = tx.objectStore(IDB_STORE).get(key); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); } catch (e) { return undefined; }
-}
-async function idbDel(key) {
-  try { const db = await idbOpen(); await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
 }
 function saveKV(key, obj) {
   const s = JSON.stringify(obj);
