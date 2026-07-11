@@ -122,7 +122,7 @@ const KEY_TR_OLD = "tradecomp_tr_blank_v4"; // migración del Comparador standal
    cambios de datos/esquema, también UI, cálculos, renombrados, etc. Así "buscar actualización" SIEMPRE
    deja copia de seguridad automática antes de aplicar lo nuevo, sin tener que juzgar caso a caso si el
    cambio "tocaba datos". Formato de dos decimales, sumamos 0.01 por entrega: 4.03, 4.04, 4.05… */
-const APP_VERSION = "5.17";
+const APP_VERSION = "5.20";
 window.APP_VERSION = APP_VERSION;
 const KEY_APPVER = "bloques_app_version";
 const KEY_AUTOBK = "bloques_autobackups_v1"; // últimas 3 copias automáticas (raw localStorage)
@@ -147,6 +147,9 @@ async function idbSet(key, val) {
 }
 async function idbGet(key) {
   try { const db = await idbOpen(); return await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readonly"); const rq = tx.objectStore(IDB_STORE).get(key); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); } catch (e) { return undefined; }
+}
+async function idbDel(key) {
+  try { const db = await idbOpen(); await new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = res; tx.onerror = () => rej(tx.error); }); } catch (e) {}
 }
 function saveKV(key, obj) {
   const s = JSON.stringify(obj);
@@ -3210,6 +3213,13 @@ function ComparadorContent({ nlv, margin, el, brokerLabel, trades, setTrades, ba
   const toggleEdit = (id) => setEditSet((s) => { const x = new Set(s); x.has(id) ? x.delete(id) : x.add(id); return x; });
   const addTrade = () => { const id = newId(); setTrades((ts) => [{ id, tkr: "", dte: "30", strike: "", credit: "", margin: "", right: "P", expiry: "", underlying: "", delta: "", pop: "" }, ...ts]); setEditSet((s) => new Set(s).add(id)); };
   const delTrade = (id) => setTrades((ts) => ts.filter((t) => t.id !== id));
+  /* limpiar todas las operaciones grabadas del Comparador (no toca posiciones ni movimientos). Doble toque:
+     el primer toque arma la confirmación 3 s, el segundo vacía. */
+  const [confirmClear, setConfirmClear] = useState(false);
+  const clearAllTrades = () => {
+    if (!confirmClear) { setConfirmClear(true); setTimeout(() => setConfirmClear(false), 3000); return; }
+    setTrades([]); setEditSet(new Set()); setConfirmClear(false);
+  };
 
   const errToStr = (err) => {
     if (!err) return "error desconocido";
@@ -3363,6 +3373,12 @@ function ComparadorContent({ nlv, margin, el, brokerLabel, trades, setTrades, ba
         <div style={{ display: "flex", gap: 8 }}>
           <input id="ocr-file-input" type="file" accept="image/*" multiple style={{ display: "none" }}
             onChange={(e) => { const fs = e.target.files ? Array.from(e.target.files) : []; e.target.value = ""; if (fs.length) runOcr(fs); }} />
+          {computed.length > 0 && (
+            <button onClick={clearAllTrades} title="Vaciar todas las operaciones grabadas del Comparador"
+              style={{ background: confirmClear ? T.red : T.card, border: "none", borderRadius: 14, padding: confirmClear ? "9px 14px" : "9px 12px", fontSize: 13.5, fontWeight: 700, color: confirmClear ? "#fff" : T.sub, cursor: "pointer", boxShadow: T.shadow }}>
+              {confirmClear ? "¿Vaciar todo?" : "🗑️"}
+            </button>
+          )}
           <button onClick={() => document.getElementById("ocr-file-input").click()} disabled={ocrBusy} style={{ background: T.card, border: "none", borderRadius: 14, padding: "9px 14px", fontSize: 13.5, fontWeight: 700, color: T.ink, cursor: "pointer", boxShadow: T.shadow }}>{ocrBusy ? "Leyendo…" : "📷 Leer captura(s)"}</button>
           <button onClick={addTrade} style={{ background: T.green, border: "none", borderRadius: 14, padding: "9px 16px", fontSize: 14, fontWeight: 700, color: "#fff", cursor: "pointer", boxShadow: "0 4px 12px rgba(27,163,76,0.3)" }}>+ Operación</button>
         </div>
@@ -3553,26 +3569,12 @@ function App() {
     nat: p.nat || inferNat(p),
   }));
   useEffect(() => {
-    /* versión de proyecto: si el HTML es una versión nueva, copia automática de los datos actuales antes de tocarlos */
-    try {
-      const stored = localStorage.getItem(KEY_APPVER);
-      let bks = [];
-      try { const raw = localStorage.getItem(KEY_AUTOBK); if (raw) { const arr = JSON.parse(raw); if (Array.isArray(arr)) bks = arr; } } catch (e) {}
-      /* si venías de una versión que guardaba más (antes eran 8), recorta ya lo existente a 3 */
-      if (bks.length > 3) { bks = bks.slice(0, 3); try { localStorage.setItem(KEY_AUTOBK, JSON.stringify(bks)); } catch (e) {} }
-      if (stored !== APP_VERSION) {
-        const hasData = BACKUP_KEYS.some((k) => localStorage.getItem(k) != null);
-        if (stored != null || hasData) {
-          const data = {};
-          BACKUP_KEYS.forEach((k) => { const v = localStorage.getItem(k); if (v != null) data[k] = v; });
-          bks = [{ version: stored || "pre-1.0", ts: Date.now(), data }, ...bks].slice(0, 3);
-          localStorage.setItem(KEY_AUTOBK, JSON.stringify(bks));
-          setUpdateNotice({ from: stored ? "v" + stored : "versión anterior", to: APP_VERSION });
-        }
-        localStorage.setItem(KEY_APPVER, APP_VERSION);
-      }
-      setAutoBackups(bks);
-    } catch (e) {}
+    /* versión de proyecto: si el HTML es una versión nueva, copia automática de los datos actuales antes de tocarlos.
+       v5.18: la captura y el almacén de copias son IDB-aware. Antes leía/escribía SOLO localStorage; si localStorage
+       se llenaba (cuota), saveKV se lo tragaba y las posiciones quedaban solo en IndexedDB → la copia salía sin
+       movimientos/estrategias/MTM (todo eso se deriva de las posiciones). Ahora cada clave se lee de localStorage o,
+       si falta, de IndexedDB, y la lista de copias se guarda en IndexedDB (autoritativo) + localStorage (best-effort). */
+    const stored = (() => { try { return localStorage.getItem(KEY_APPVER); } catch (e) { return null; } })();
     let haveAcc = false, havePos = false;
     try { const f = localStorage.getItem(KEY_FLOWS); if (f) { const arr = JSON.parse(f); if (Array.isArray(arr)) setFlows(arr); } } catch (e) {}
     try { const a = localStorage.getItem(KEY_ACC); if (a) { setAccounts(JSON.parse(a)); haveAcc = true; } } catch (e) {}
@@ -3604,6 +3606,36 @@ function App() {
           }
         } catch (e) {}
       }
+
+      /* ---- copia automática por cambio de versión (IDB-aware), se ejecuta antes de que se sobrescriba nada ---- */
+      try {
+        const readRaw = async (k) => {
+          let v = null;
+          try { v = localStorage.getItem(k); } catch (e) {}
+          if (v == null) { try { const iv = await idbGet(k); if (iv != null) v = iv; } catch (e) {} }
+          return v;
+        };
+        // lista de copias: IDB primero, luego localStorage (migración de versiones antiguas)
+        let bks = [];
+        try { const ib = await idbGet(KEY_AUTOBK); if (ib) { const arr = JSON.parse(ib); if (Array.isArray(arr)) bks = arr; } } catch (e) {}
+        if (!bks.length) { try { const raw = localStorage.getItem(KEY_AUTOBK); if (raw) { const arr = JSON.parse(raw); if (Array.isArray(arr)) bks = arr; } } catch (e) {} }
+        if (bks.length > 3) bks = bks.slice(0, 3);
+        if (stored !== APP_VERSION) {
+          const data = {};
+          for (const k of BACKUP_KEYS) { const v = await readRaw(k); if (v != null) data[k] = v; }
+          const hasData = Object.keys(data).length > 0;
+          if (stored != null || hasData) {
+            bks = [{ version: stored || "pre-1.0", ts: Date.now(), data }, ...bks].slice(0, 3);
+            setUpdateNotice({ from: stored ? "v" + stored : "versión anterior", to: APP_VERSION });
+          }
+          try { localStorage.setItem(KEY_APPVER, APP_VERSION); } catch (e) {}
+        }
+        // persiste la lista de copias: IDB (autoritativo, sin límite práctico) + localStorage (best-effort)
+        try { await idbSet(KEY_AUTOBK, JSON.stringify(bks)); } catch (e) {}
+        try { localStorage.setItem(KEY_AUTOBK, JSON.stringify(bks)); } catch (e) {}
+        setAutoBackups(bks);
+      } catch (e) {}
+
       setLoaded(true);
     })();
   }, []);
@@ -3744,11 +3776,17 @@ function App() {
       });
   };
 
-  const restoreAutoBackup = (bk) => {
+  const restoreAutoBackup = async (bk) => {
     if (confirmAutoBk !== bk.ts) { setConfirmAutoBk(bk.ts); setTimeout(() => setConfirmAutoBk(null), 4000); return; }
     try {
-      BACKUP_KEYS.forEach((k) => { const v = bk.data[k]; if (v == null) localStorage.removeItem(k); else localStorage.setItem(k, v); });
-      localStorage.setItem(KEY_APPVER, APP_VERSION);
+      /* v5.18: restaura a localStorage (best-effort) y a IndexedDB (autoritativo). Antes solo escribía en
+         localStorage, así que si los datos no cabían ahí (cuota), las posiciones no se restauraban. */
+      for (const k of BACKUP_KEYS) {
+        const v = bk.data[k];
+        if (v == null) { try { localStorage.removeItem(k); } catch (e) {} await idbDel(k); }
+        else { try { localStorage.setItem(k, v); } catch (e) {} await idbSet(k, v); }
+      }
+      try { localStorage.setItem(KEY_APPVER, APP_VERSION); } catch (e) {}
       location.reload();
     } catch (e) { setRestoreMsg("err"); }
   };
@@ -4908,8 +4946,12 @@ function App() {
       )}
       {backupOpen && (
         <div onClick={() => setBackupOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(20,18,14,0.45)", display: "flex", alignItems: "center", justifyContent: "center", padding: 18, zIndex: 50, overflowY: "auto" }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 24, padding: 22, maxWidth: 460, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
-            <div style={{ fontSize: 21, fontWeight: 800, color: T.ink, marginBottom: 8 }}>Backup de datos</div>
+          <div onClick={(e) => e.stopPropagation()} style={{ background: T.card, borderRadius: 24, maxWidth: 460, width: "100%", boxShadow: "0 20px 60px rgba(0,0,0,0.3)", maxHeight: "calc(100vh - 36px)", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+            <div style={{ position: "sticky", top: 0, background: T.card, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, padding: "18px 20px 10px", borderRadius: "24px 24px 0 0", zIndex: 3 }}>
+              <div style={{ fontSize: 21, fontWeight: 800, color: T.ink }}>Backup de datos</div>
+              <button onClick={() => setBackupOpen(false)} aria-label="Cerrar" style={{ background: T.tile, border: "none", borderRadius: 12, width: 34, height: 34, fontSize: 15, color: T.sub, cursor: "pointer", flexShrink: 0 }}>✕</button>
+            </div>
+            <div style={{ padding: "0 20px 20px" }}>
             <div style={{ fontSize: 14, color: T.sub, lineHeight: 1.5, marginBottom: 14 }}>Lo más cómodo entre dispositivos: <b style={{ color: T.ink }}>Descargar archivo</b> (lo comparte por AirDrop / Mensajes o lo guarda en Archivos) y en el otro móvil <b style={{ color: T.ink }}>Importar archivo</b>. También puedes copiar/pegar el texto de abajo a mano. Backup único de toda la app: brokers, posiciones, cash y margen de cada broker, snapshots, aportaciones, operaciones del Comparador y tu API key.</div>
             <input id="backup-file-input" type="file" accept="application/json,.json" onChange={importBackupFile} style={{ display: "none" }} />
             <div style={{ display: "flex", gap: 10, marginBottom: 12 }}>
@@ -4951,6 +4993,7 @@ function App() {
             )}
             <div style={{ textAlign: "center", marginTop: 12 }}>
               <button onClick={() => setBackupOpen(false)} style={{ background: "transparent", border: "none", fontSize: 14, fontWeight: 600, color: T.sub, cursor: "pointer" }}>Cerrar</button>
+            </div>
             </div>
           </div>
         </div>
